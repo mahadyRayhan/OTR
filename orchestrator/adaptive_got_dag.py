@@ -426,51 +426,58 @@ def _heuristic_judge(question: str, answer: str) -> float:
 # GoT EXPANSION OPERATORS
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _make_branch_tasks(parent: GoTNode, n_branches: int = 2) -> List[TaskNode]:
+async def _make_branch_tasks(parent: GoTNode, model: Optional[genai.GenerativeModel], n_branches: int = 2) -> List[TaskNode]:
     """
     BRANCH: decompose parent's query into n_branches sub-questions.
-    Each sub-question focuses on one facet of the parent.
-
-    The branch queries are constructed deterministically from the parent:
-        - CONCEPTUAL branch: "Explain [mechanism/sub-component] of: {parent_query}"
-        - PROCEDURAL branch: "Show a working example for: {parent_query}"
-        - ANALYTICAL branch: "Compare alternatives and trade-offs for: {parent_query}"
-
-    In production, these prefixes would be LLM-generated. Here they are
-    rule-based to keep the system deterministic when model=None.
+    Dynamically asks an LLM for subtasks and delegates to appropriate agents.
     """
     base = parent.task.query
-    dim = parent.dim
-    new_id_base = parent.task.id * 10  # avoids ID collision with parent
+    new_id_base = parent.task.id * 10
+    
+    # Simple fallback if no model is provided
+    if not model:
+        return [
+            TaskNode(id=new_id_base + i, agent=parent.task.agent, query=f"Explore facet {i+1} of: {base}", depends_on=[parent.task.id])
+            for i in range(n_branches)
+        ]
+        
+    prompt = f"""
+    You are an Agent Coordinator. The current agent ({parent.task.agent.upper()}) failed to fully answer the query below.
+    Reason for failure: {parent.failure_mode}
+    Failure Critique: {parent.judge_reasoning}
+    Query: "{base}"
+    
+    Please decompose this query into up to {n_branches} distinct sub-queries that will help resolve the failure.
+    Delegate each sub-query to the most appropriate agent from the registry below.
+    
+    AGENT REGISTRY:
+    - rag: General knowledge, definitions, facts, pathway analysis, data format facts.
+    - scholar: Finding actual human experts, research papers, citations.
+    - code: Writing Python scripts, code generation, debugging.
+    - cloud: AWS, deployment, infrastructure.
 
-    if dim == Dim.CONCEPTUAL:
-        prefixes = [
-            f"Define and explain the core mechanism of: {base}",
-            f"Describe the biological context and significance of: {base}",
-            f"What are the key sub-components involved in: {base}",
-        ]
-    elif dim == Dim.PROCEDURAL:
-        prefixes = [
-            f"Write a minimal working implementation for: {base}",
-            f"Show edge-case handling and error recovery for: {base}",
-            f"Provide a usage example with real bioinformatics data for: {base}",
-        ]
-    else:  # ANALYTICAL
-        prefixes = [
-            f"Compare the leading approaches for: {base}",
-            f"Evaluate performance benchmarks and limitations of: {base}",
-            f"Summarise recent literature and open questions on: {base}",
-        ]
-
-    return [
-        TaskNode(
-            id=new_id_base + i,
-            agent=parent.task.agent,
-            query=prefixes[i],
-            depends_on=[parent.task.id],
-        )
-        for i in range(min(n_branches, len(prefixes)))
+    Return ONLY a JSON list of objects:
+    [
+      {{"agent": "rag", "query": "background check on X"}},
+      {{"agent": "code", "query": "write python script for Y"}}
     ]
+    """
+    try:
+        res = await asyncio.wait_for(asyncio.to_thread(model.generate_content, prompt), timeout=15)
+        text = res.text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(text)
+        tasks = []
+        for i, item in enumerate(data):
+            tasks.append(TaskNode(
+                id=new_id_base + i, 
+                agent=item.get("agent", "rag").lower(), 
+                query=item.get("query", ""), 
+                depends_on=[parent.task.id]
+            ))
+        return tasks[:n_branches]
+    except Exception as e:
+        logger.error(f"Failed to generate dynamic branches: {e}")
+        return [TaskNode(id=new_id_base, agent=parent.task.agent, query=f"Refine focus on: {base}", depends_on=[parent.task.id])]
 
 
 def _make_refine_task(parent: GoTNode) -> TaskNode:
@@ -724,12 +731,13 @@ class AdaptiveGoTDAG:
             return GoTOp.REFINE
         return GoTOp.BRANCH
 
-    def expand_node(
+    async def expand_node(
         self,
         node: GoTNode,
         budget: Dict[Dim, int],
         wave_number: int,
         n_branches: int = 2,
+        model: Optional[genai.GenerativeModel] = None,
     ) -> List[GoTNode]:
         """
         Expand a low-quality node using the appropriate GoT operator.
@@ -749,7 +757,7 @@ class AdaptiveGoTDAG:
         new_nodes: List[GoTNode] = []
 
         if op == GoTOp.BRANCH:
-            child_tasks = _make_branch_tasks(node, n_branches=n_branches)
+            child_tasks = await _make_branch_tasks(node, model, n_branches=n_branches)
             for ct in child_tasks:
                 nid = self._new_node_id()
                 child = GoTNode(
@@ -934,7 +942,7 @@ class AdaptiveGoTDAG:
 
             # ── Expand selected nodes ─────────────────────────────────────────
             for node in to_expand:
-                new_nodes = self.expand_node(node, budget, wave_number, n_branches)
+                new_nodes = await self.expand_node(node, budget, wave_number, n_branches, model)
                 total_expansions += len(new_nodes)
                 logger.info(
                     "[GoTDAG] Expanded %s (dim=%s, depth=%d→%d, q=%.3f) → %d children.",

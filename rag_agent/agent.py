@@ -78,7 +78,7 @@ async def llm_as_judge(query: str, answer: str, context: str, model) -> str:
 # ---------------------------------------------------------
 # MAIN AGENT CALLER
 # ---------------------------------------------------------
-async def call_rag_agent(user_input: str, strategy: str = "cot") -> Dict[str, Any]:
+async def call_rag_agent(user_input: str, strategy: str = "cot", depth: int = 1, agent_registry: str = "") -> Dict[str, Any]:
     # 1. Action: Retrieve from local markdown file
     top_chunks = rag_engine.retrieve(user_input, top_k=1)
     llm = get_llm_model()
@@ -86,7 +86,7 @@ async def call_rag_agent(user_input: str, strategy: str = "cot") -> Dict[str, An
     # 2. FALLBACK: If local KB fails, use LLM's general knowledge!
     if not top_chunks or top_chunks[0].score == 0:
         if llm:
-            prompt = f"You are a bioinformatics expert. Answer this query comprehensively: {user_input}"
+            prompt = f"You are a bioinformatics expert. Strategy: {strategy}, Expand to Depth: {depth}. Agent Registry: {agent_registry}. Answer this query comprehensively: {user_input}"
             fallback_answer = (await asyncio.to_thread(llm.generate_content, prompt)).text.strip()
             return {
                 "answer": fallback_answer,

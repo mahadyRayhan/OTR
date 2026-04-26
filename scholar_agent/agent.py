@@ -248,7 +248,7 @@ class ScholarAgent:
 # ---------------------------------------------------------
 agent_instance = ScholarAgent()
 
-async def call_scholar_agent(user_input: str, is_collaboration=False, user_name="Unknown Researcher", limit=1) -> str:
+async def call_scholar_agent(user_input: str, is_collaboration=False, user_name="Unknown Researcher", limit=1, strategy: str = "cot", depth: int = 1, agent_registry: str = "") -> str:
     llm = get_llm_model()
     clean_topic = await extract_search_topic(user_input, llm)
     print(f"   [System] Cleaned query for API: '{clean_topic}' | Requesting {limit} expert(s)")

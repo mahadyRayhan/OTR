@@ -380,13 +380,7 @@
 
 #         print("\n" + "="*60)
 #         print("📊 FINAL LEADERBOARD")
-#         print("="*60)
-#         avg_scores = {d: sum(s)/len(s) if s else 0 for d, s in scores.items()}
-#         ranked = sorted(avg_scores.items(), key=lambda x: x[1], reverse=True)
-#         for rank, (name, avg) in enumerate(ranked, 1):
-#             print(f"{rank}. {name.upper().ljust(25)} : {avg:.1f} / 10")
-#         print("="*60)
-
+import json
 import asyncio
 import os
 import re
@@ -428,21 +422,34 @@ class OrchestratorEngine:
         else:
             self.openai_client = None
 
-    async def _execute_agent(self, agent_name: str, query: str) -> str:
+    async def _execute_agent(self, agent_name: str, query: str, depth: int = 1) -> str:
         """Standard Agent Execution"""
+        agent_registry = (
+            "RAG: General knowledge, biological definitions, pathway analysis.\n"
+            "SCHOLAR: Finding actual human experts, research papers, citations.\n"
+            "CODE: Writing Python scripts, code generation, debugging.\n"
+            "CLOUD: AWS, deployment, infrastructure."
+        )
+        strategy_match = re.search(r'--strategy=(\w+)', query.lower())
+        strategy = strategy_match.group(1) if strategy_match else "cot"
+        clean_query = re.sub(r'--strategy=\w+', '', query).strip()
+        
         try:
-            if agent_name == "code": return await call_code_agent(query)
-            if agent_name == "cloud": return call_cloud_agent(query)
+            if agent_name == "code": return await call_code_agent(clean_query, strategy, depth, agent_registry)
+            if agent_name == "cloud": return await call_cloud_agent(clean_query, strategy, depth, agent_registry)
             if agent_name == "scholar":
                 limit = 1
-                match = re.search(r'\b([1-5])\b', query)
+                # Normalize spelled-out numbers 1-5 to digits so the regex catches them
+                text_to_num = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5"}
+                query_normalized = clean_query.lower()
+                for word, digit in text_to_num.items():
+                    query_normalized = re.sub(rf'\b{word}\b', digit, query_normalized)
+                    
+                match = re.search(r'\b([1-5])\b', query_normalized)
                 if match: limit = int(match.group(1))
-                return await call_scholar_agent(query, is_collaboration=False, limit=limit)
+                return await call_scholar_agent(clean_query, is_collaboration=False, limit=limit, strategy=strategy, depth=depth, agent_registry=agent_registry)
             else: # RAG
-                strategy_match = re.search(r'--strategy=(\w+)', query.lower())
-                rag_strategy = strategy_match.group(1) if strategy_match else "tot"
-                clean_query = re.sub(r'--strategy=\w+', '', query).strip()
-                rag_data = await call_rag_agent(clean_query, strategy=rag_strategy)
+                rag_data = await call_rag_agent(clean_query, strategy=strategy, depth=depth, agent_registry=agent_registry)
                 return f"Source: {rag_data.get('source_used')}\nAnswer: {rag_data['answer']}"
         except Exception as e:
             return f"Error executing agent: {e}"
@@ -552,10 +559,9 @@ class OrchestratorEngine:
                     query = await self._resolve_dependencies(query, node.parent_ids, prev_results)
                     
                 print(f"      [Executing] Node {node.node_id[:4]} ({node.task.agent.upper()}): {query[:60]}...")
-                return await self._execute_agent(node.task.agent, query)
+                return await self._execute_agent(node.task.agent, query, depth=node.depth)
 
             print("\n   [GoT DAG] Commencing Adaptive Wave Execution...")
-            # Bug 5 Fix: Pass fallback profile if profiler is off
             final_answer = await got_orchestrator.run(
                 tasks=tasks,
                 user_profile=user_profiler.profile if config.Config.USE_PROFILER else None, 
@@ -594,6 +600,44 @@ class OrchestratorEngine:
         judge_score_raw = await self._gpt_as_judge(user_input, final_answer)
         match = re.search(r'Score:\s*(\d+)/10', judge_score_raw, re.IGNORECASE)
         numeric_score = int(match.group(1)) if match else 0
+
+        # 🚀 GLOBAL DIAGNOSTICS & RETRY LOOP
+        retries = 0
+        max_retries = 2
+        
+        while numeric_score < 8 and retries < max_retries:
+            print(f"   [Global Diagnosis] Score {numeric_score}/10 is low. Diagnosing failure...")
+            retries += 1
+            diag_prompt = f"""
+            The final answer failed to satisfy the original query.
+            Original Query: "{user_input}"
+            Final Answer: "{final_answer}"
+            Judge Score: {judge_score_raw}
+            
+            Based on the Judge's critique, which specific agent failed or what information is missing?
+            Available agents: rag, scholar, code, cloud.
+            Output ONLY a JSON object:
+            {{"failing_agent": "scholar", "revised_query": "specific context or question to fix the failure"}}
+            """
+            try:
+                res = await asyncio.to_thread(self.llm.generate_content, diag_prompt)
+                diag_data = json.loads(res.text.replace('```json', '').replace('```', '').strip())
+                agent = diag_data.get('failing_agent', 'rag')
+                new_q = diag_data.get('revised_query', user_input)
+                
+                print(f"   [Diagnostician] Retrying agent '{agent}' with query: '{new_q}' at HIGHER DEPTH (3).")
+                fix_result = await self._execute_agent(agent, new_q, depth=3)
+                
+                synth_prompt = f"Update the final answer with this new information.\nCRITICAL: Do NOT summarize the new info. If the new info contains code blocks, you MUST copy the exact code blocks into your new answer.\n\nOld Answer:\n{final_answer}\n\nNew Info:\n{fix_result}\n\nNew Final Answer:"
+                final_answer = (await asyncio.to_thread(self.llm.generate_content, synth_prompt)).text.strip()
+                
+                print("⚖️  [Orchestrator] Re-evaluating Global Answer...")
+                judge_score_raw = await self._gpt_as_judge(user_input, final_answer)
+                match = re.search(r'Score:\s*(\d+)/10', judge_score_raw, re.IGNORECASE)
+                numeric_score = int(match.group(1)) if match else 0
+            except Exception as e:
+                print(f"   [Diagnostics Error] Global retry failed: {e}")
+                break
 
         return {"final_answer": final_answer, "judge_score": judge_score_raw, "numeric_score": numeric_score}
 

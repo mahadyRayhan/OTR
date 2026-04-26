@@ -2,7 +2,7 @@ import os
 import asyncio
 import google.generativeai as genai
 
-async def call_code_agent(user_input: str) -> str:
+async def call_code_agent(user_input: str, strategy: str = "cot", depth: int = 1, agent_registry: str = "") -> str:
     """Uses Gemini to actually write Python scripts for bioinformatics."""
     api_key = os.getenv("GOOGLE_API_KEY")
     
@@ -15,9 +15,12 @@ async def call_code_agent(user_input: str) -> str:
         model = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt = f"""
-        You are an expert Bioinformatics Software Engineer. 
-        Write a clean, documented Python script to fulfill this request: "{user_input}"
-        Return ONLY the Python code inside markdown blocks. Include inline comments explaining how it works.
+        You are an expert Software Engineer. 
+        Use the {strategy.upper()} reasoning strategy and expand your thoughts to depth level {depth}.
+        Available Agents Registry: {agent_registry}
+        
+        Write clean, documented code to fulfill this request: "{user_input}"
+        Return ONLY the code inside markdown blocks. Include inline comments explaining how it works.
         """
         
         # Run asynchronously so it doesn't block other agents!
