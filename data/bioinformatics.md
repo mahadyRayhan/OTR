@@ -17,5 +17,12 @@ When analyzing Next-Generation Sequencing (NGS) data, two of the most popular al
 * **BWA (Burrows-Wheeler Aligner):** Best suited for aligning reads against a large reference genome. It is highly accurate for finding structural variants and handles longer gaps well.
 * **Bowtie2:** Extremely fast and memory-efficient. It is generally preferred for standard RNA-seq mapping and situations where speed is the absolute priority, though it may struggle with large indels compared to BWA.
 
+## GATK Best Practices workflow
+The GATK Best Practices provide a standard step-by-step pipeline for variant calling. The correctly ordered execution stages are:
+1. Alignment & Pre-processing (BWA, MarkDuplicates, BaseRecalibrator, ApplyBQSR)
+2. HaplotypeCaller (Outputs a GVCF)
+3. GenotypeGVCFs (Joint Genotyping to produce a raw VCF)
+4. VariantFiltration (Hard filtering on the raw VCF outputted by GenotypeGVCFs)
+
 ## Future Trends
 With the rise of Artificial Intelligence and Machine Learning, bioinformatics is rapidly evolving to predict protein folding (e.g., AlphaFold) and accelerate drug discovery processes.
