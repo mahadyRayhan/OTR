@@ -28,12 +28,6 @@ BENCHMARK_QUERIES =[
     "Identify the standard file format for storing genetic variants. Then, write a Python script using the 'pysam' library to extract the allele frequencies from it, and explain what a 'VCF header' does."
 ]
 
-BENCHMARK_QUERIES = [
-    "What are the key mathematical differences between global alignment (Needleman-Wunsch) and local alignment (Smith-Waterman)? Based on those differences, write a Biopython script that executes a local alignment between two sample DNA sequences.",
-    "Write a complete Nextflow pipeline script for trimming Illumina FASTQ reads using FastQC and Trimmomatic. Once the script is written, design an AWS Batch and S3 Terraform deployment architecture to run that exact pipeline.",
-    "Find 2 human experts who have published recent papers on 'RNA-seq Splice-Aware Alignment'. Then, explain the primary algorithm those experts use. Finally, write a bash script that downloads the tool associated with that algorithm."
-    ]
-
 async def run_study():
     engine = OrchestratorEngine()
     modes = ["none", "raw", "adaptive"]

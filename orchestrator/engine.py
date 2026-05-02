@@ -24,6 +24,73 @@ from cloud_agent.agent import call_cloud_agent
 from code_agent.agent import call_code_agent
 from profiler_agent.agent import user_profiler
 
+# =========================================================
+# 🚀 CUGCR ATOMIZER (Deterministic Context Parsing)
+# =========================================================
+from dataclasses import dataclass
+from enum import Enum
+import re
+
+class AtomType(Enum):
+    CODE_BLOCK = "code"
+    NAMED_ENTITY = "entity"
+    PROSE_CLAIM = "prose"
+
+@dataclass
+class ContextAtom:
+    type: AtomType
+    content: str
+    is_protected: bool
+
+def atomize_output(raw_output: str) -> list[ContextAtom]:
+    """Extracts protected code, biological entities, and prose deterministically."""
+    atoms = []
+    
+    # 1. Protected: Extract Code Blocks
+    for match in re.finditer(r'```[\s\S]*?```', raw_output):
+        atoms.append(ContextAtom(AtomType.CODE_BLOCK, match.group(), is_protected=True))
+    
+    # Remove code for further processing
+    prose_only = re.sub(r'```[\s\S]*?```', '', raw_output)
+    
+    # 2. Protected: Extract basic bio-entities/acronyms (e.g., BRCA1, GATK)
+    bio_pattern = r'\b([A-Z]{2,}[0-9]*|[A-Z][a-z]+-\d+)\b'
+    for match in re.finditer(bio_pattern, prose_only):
+        atoms.append(ContextAtom(AtomType.NAMED_ENTITY, match.group(), is_protected=True))
+        
+    # 3. Unprotected: Extract prose sentences
+    for sentence in prose_only.split('. '):
+        if len(sentence.strip()) > 15:
+            atoms.append(ContextAtom(AtomType.PROSE_CLAIM, sentence.strip() + ".", is_protected=False))
+            
+    return atoms
+
+def build_rigid_prompt(original_query: str, raw_context: str, token_budget: int = 400) -> str:
+    """Filters atoms and injects them into a rigid, drift-proof template."""
+    atoms = atomize_output(raw_context)
+    
+    # Separate protected vs unprotected
+    code_blocks = [a.content for a in atoms if a.type == AtomType.CODE_BLOCK]
+    entities = list(set([a.content for a in atoms if a.type == AtomType.NAMED_ENTITY]))
+    prose = [a.content for a in atoms if a.type == AtomType.PROSE_CLAIM]
+    
+    # Budgeting: Always keep code and entities. Limit prose to save tokens.
+    context_block = ""
+    if code_blocks:
+        context_block += "### Upstream Code Artifacts\n" + "\n".join(code_blocks) + "\n\n"
+    if entities:
+        context_block += "### Key Technical Entities\n" + ", ".join(entities[:10]) + "\n\n"
+    if prose:
+        # Only take the first few sentences of prose to stay under budget
+        context_block += "### Supporting Evidence\n" + "\n".join(f"- {c}" for c in prose[:4]) + "\n\n"
+        
+    # Rigid Template: Instruction is ALWAYS at the bottom!
+    return f"""{context_block}---
+## Your Task
+{original_query}
+"""
+# =========================================================
+
 class OrchestratorEngine:
     def __init__(self):
         self.registry = DecomposerRegistry()
@@ -90,22 +157,11 @@ class OrchestratorEngine:
 
         # PROTOCOL C: Adaptive Injection (The New, Safe LLM Weaver)
         if ablation_mode == "adaptive":
-            prompt = f"""
-            You are a Context Injector. You must provide the Upstream Context to the Downstream Agent without changing the original instruction.
-            
-            Upstream Context:
-            {context}
-            
-            Original Downstream Query: {query}
-            
-            CRITICAL INSTRUCTION:
-            Rewrite the query to explicitly include the most important facts from the Upstream Context. 
-            DO NOT DELETE the original instruction (e.g., if it says 'write a script', your rewritten query MUST still say 'write a script').
-            
-            Rewritten Query:"""
-            res = await asyncio.to_thread(self.llm.generate_content, prompt.strip())
-            return res.text.strip()
-            
+            # 🚀 Use the new deterministic atomizer instead of an LLM!
+            # It mathematically guarantees the original query is NEVER deleted.
+            rigid_query = build_rigid_prompt(original_query=query, raw_context=context)
+            return rigid_query
+                        
         # Fallback if an unknown mode is passed
         return query
 
@@ -194,8 +250,30 @@ class OrchestratorEngine:
 
                 # REFINE NODE FIX
                 if node.op == GoTOp.REFINE:
-                    print(f"      [GoT Operator] Safe Processing for REFINE node...")
-                    refine_prompt = f"Critique from Judge: {node.judge_reasoning}\n\nImprove the answer based on the critique.\n{query}"
+                    print(f"      [GoT Operator] Safe Processing for REFINE node with Reflexion...")
+                    
+                    # Fetch the previous bad answer from the parent node
+                    previous_answer = parent_nodes[0].result if parent_nodes else "No previous answer recorded."
+                    
+                    refine_prompt = f"""
+                    ## ⚠ Retry Attempt Required
+                    
+                    ### Your Previous Failed Attempt:
+                    {previous_answer}
+
+                    ### Judge's Critique:
+                    {node.judge_reasoning}
+
+                    ### CRITICAL INSTRUCTION:
+                    Before writing your final answer, you MUST write a <reflection> block analyzing your mistake:
+                    <reflection>
+                    - What went wrong in my previous attempt based on the critique:
+                    - How I will correct it:
+                    </reflection>
+                    
+                    ## Your Task:
+                    {query}
+                    """
                     res = await asyncio.to_thread(self.llm.generate_content, refine_prompt.strip())
                     return res.text.strip()
 
