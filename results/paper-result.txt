@@ -1,0 +1,45 @@
+python generate_paper_results.py
+
+================================================================================
+🏆 LAYER 1: TASK OUTCOME (End-to-End Effectiveness)
+================================================================================
+Protocol        | Task Success Rate    | Mean GTS ± StdDev    | Pairwise Win Rate
+--------------------------------------------------------------------------------
+NONE            |              33.3% |       5.83 ± 2.23   |             0.0%
+RAW             |              33.3% |       5.83 ± 2.64   |            33.3%
+ADAPTIVE        |              16.7% |       5.83 ± 1.83   |            66.7%
+
+================================================================================
+📡 LAYER 2: COMMUNICATION QUALITY (Agent-to-Agent)
+================================================================================
+Protocol        | Info Gain (ΔQ)  | Context Relevance    | Dependency Satisfaction (DSR)
+--------------------------------------------------------------------------------
+NONE            |           +0.00 |               87.5% |                      100.0%
+RAW             |           +0.00 |               96.4% |                      100.0%
+ADAPTIVE        |           +0.00 |               79.2% |                      100.0%
+
+================================================================================
+⚙️ LAYER 3: SYSTEM COST & ROBUSTNESS
+================================================================================
+Protocol        | Token Cost   | Comm Efficiency    | Latency    | Recovery Rate
+--------------------------------------------------------------------------------
+NONE            | 1819         | 0.000              | 204.2  s | 0.0%
+RAW             | 526          | 0.000              | 185.7  s | 0.0%
+ADAPTIVE        | 956          | 0.000              | 208.7  s | 0.0%
+
+================================================================================
+📈 PARETO FRONTIER DATA: QUALITY vs COST
+================================================================================
+Plot these coordinates (X = Cost/Tokens, Y = Quality/GTS) to show efficiency domination:
+  NONE       -> X (Tokens): 1819   | Y (Score): 5.83
+  RAW        -> X (Tokens): 526    | Y (Score): 5.83
+  ADAPTIVE   -> X (Tokens): 956    | Y (Score): 5.83
+
+================================================================================
+🎯 HYPOTHESIS TEST: CONTEXT SENSITIVITY (SWEET SPOT)
+================================================================================
+Utilization 0-20%      -> Mean NQS: 0.33/1.0 (Based on 3 edges)
+Utilization 20-40%     -> Mean NQS: 0.00/1.0 (Based on 0 edges)
+Utilization 40-60%     -> Mean NQS: 0.00/1.0 (Based on 0 edges)
+Utilization 60-80%     -> Mean NQS: 0.00/1.0 (Based on 0 edges)
+Utilization 80-100%    -> Mean NQS: 0.71/1.0 (Based on 3 edges)

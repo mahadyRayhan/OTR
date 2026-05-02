@@ -126,6 +126,13 @@ async def main():
             if not user_input.strip(): continue
 
             output = await engine.run(user_input)
+            # 🚀 Save the communication metrics to a file to verify them!
+            if "communication_metrics" in output:
+                import json
+                with open("comm_debug.json", "w") as f:
+                    json.dump(output["communication_metrics"], f, indent=4)
+                print("\n📄 Saved communication logs to 'comm_debug.json' for verification.")
+
             print("\n==================================================")
             print("🤖 SYSTEM SYNTHESIS:")
             print("==================================================")

@@ -25,3 +25,14 @@ class Config:
     # ---------------------------------------------------------
     GENERATION_MODEL = "gemini-2.5-flash"
     JUDGE_MODEL = "gpt-5.4"
+
+    # ---------------------------------------------------------
+    # AGENT CAPABILITIES (Master Registry)
+    # ---------------------------------------------------------
+    AGENT_REGISTRY_PROMPT = """
+    AGENT REGISTRY & CAPABILITIES:
+    - 'rag' : General knowledge, biology concepts, definitions, theory, facts, pathway analysis, data formats.
+    - 'scholar' : Finding actual human experts, researchers, real names, research papers, and citations.
+    - 'code' : Writing Python scripts, pipeline code (Snakemake/Nextflow), code generation, debugging.
+    - 'cloud' : AWS, cloud deployment, infrastructure design (Terraform/Docker/Kubernetes).
+    """

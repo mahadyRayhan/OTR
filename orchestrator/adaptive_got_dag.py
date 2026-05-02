@@ -75,6 +75,7 @@ from enum import Enum
 from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import google.generativeai as genai
+import config
 
 # ── import sibling modules (or stub if running standalone) ────────────────────
 try:
@@ -450,11 +451,7 @@ async def _make_branch_tasks(parent: GoTNode, model: Optional[genai.GenerativeMo
     Please decompose this query into up to {n_branches} distinct sub-queries that will help resolve the failure.
     Delegate each sub-query to the most appropriate agent from the registry below.
     
-    AGENT REGISTRY:
-    - rag: General knowledge, definitions, facts, pathway analysis, data format facts.
-    - scholar: Finding actual human experts, research papers, citations.
-    - code: Writing Python scripts, code generation, debugging.
-    - cloud: AWS, deployment, infrastructure.
+    {config.Config.AGENT_REGISTRY_PROMPT}
 
     Return ONLY a JSON list of objects:
     [
@@ -889,6 +886,12 @@ class AdaptiveGoTDAG:
                         score = _heuristic_judge(node.task.query, node.result or "")
                     node.quality_score = score
                     node.failure_mode = failure_mode  
+                    
+                    # 🚀 NEW: Update the communication tracker with the REAL score!
+                    from .evaluation.communication_log import comm_tracker
+                    for log in comm_tracker.logs:
+                        if log.to_id == node.node_id:       # <--- FIXED!
+                            log.quality_score = score  
 
             # ── Wave quality summary ──────────────────────────────────────────
             scores = [n.quality_score for n in self._nodes.values()
