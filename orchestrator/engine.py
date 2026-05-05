@@ -31,6 +31,15 @@ from dataclasses import dataclass
 from enum import Enum
 import re
 
+# Add these with your other imports at the top
+import numpy as np
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    pass
+
 class AtomType(Enum):
     CODE_BLOCK = "code"
     NAMED_ENTITY = "entity"
@@ -41,6 +50,38 @@ class ContextAtom:
     type: AtomType
     content: str
     is_protected: bool
+
+# =========================================================
+# 🚀 CUGCR DEPENDENCY MANIFESTS
+# =========================================================
+@dataclass
+class DependencyManifest:
+    agent_type: str
+    required_atom_types: list[AtomType]
+    token_budget: int
+
+AGENT_MANIFESTS = {
+    "code": DependencyManifest(
+        agent_type="code",
+        required_atom_types=[AtomType.CODE_BLOCK, AtomType.NAMED_ENTITY],
+        token_budget=1000  # Code needs high context to avoid crashing
+    ),
+    "cloud": DependencyManifest(
+        agent_type="cloud",
+        required_atom_types=[AtomType.CODE_BLOCK, AtomType.NAMED_ENTITY],
+        token_budget=1000
+    ),
+    "rag": DependencyManifest(
+        agent_type="rag",
+        required_atom_types=[AtomType.NAMED_ENTITY],
+        token_budget=400   # Theory needs tight boundaries
+    ),
+    "scholar": DependencyManifest(
+        agent_type="scholar",
+        required_atom_types=[AtomType.NAMED_ENTITY],
+        token_budget=200   # Just names and tools
+    )
+}
 
 def atomize_output(raw_output: str) -> list[ContextAtom]:
     """Extracts protected code, biological entities, and prose deterministically."""
@@ -97,6 +138,12 @@ class OrchestratorEngine:
         self.selector = AutoDecomposerSelector(self.registry)
         self.dag_builder = DAGRegistry().get(config.Config.DAG_BUILDER)
         
+        # 🚀 NEW: Load the local embedding model if HEAVY mode is active
+        self.embedder = None
+        if getattr(config.Config, "CONTEXT_ROUTING_MODE", "light") == "heavy":
+            print("⏳ Loading local semantic embedding model for Heavy Context Routing...")
+            self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+
         # Generator Model (Gemini)
         api_key = os.getenv("GOOGLE_API_KEY")
         if api_key and api_key != "your_google_api_key_here":
@@ -111,6 +158,50 @@ class OrchestratorEngine:
             self.openai_client = AsyncOpenAI(api_key=openai_key)
         else:
             self.openai_client = None
+
+    # 🚀 CUGCR Semantic Math Algorithm (With Manifests)
+    def _score_and_select_atoms(self, atoms: list, downstream_query: str, downstream_agent: str, budget_multiplier: float = 1.0) -> list:
+        # Load the manifest for the specific downstream agent
+        manifest = AGENT_MANIFESTS.get(downstream_agent, AGENT_MANIFESTS["rag"])
+        current_budget = int(manifest.token_budget * budget_multiplier)
+
+        selected = []
+        used_tokens = 0
+        
+        # 1. Hard requirements: Always keep protected atoms required by this agent
+        for atom in atoms:
+            if atom.is_protected and atom.type in manifest.required_atom_types:
+                selected.append(atom)
+                used_tokens += len(atom.content.split())
+        
+        unprotected = [a for a in atoms if a not in selected]
+        if not unprotected or not self.embedder:
+            return selected
+            
+        # 2. Dense Embeddings (Conceptual similarity)
+        query_emb = self.embedder.encode([downstream_query])
+        atom_docs = [a.content for a in unprotected]
+        atom_embs = self.embedder.encode(atom_docs)
+        dense_scores = cosine_similarity(query_emb, atom_embs)[0]
+        
+        # 3. Sparse Embeddings (Exact keyword overlap via TF-IDF)
+        vectorizer = TfidfVectorizer().fit([downstream_query] + atom_docs)
+        tfidf_matrix = vectorizer.transform(atom_docs)
+        query_tfidf = vectorizer.transform([downstream_query])
+        sparse_scores = cosine_similarity(query_tfidf, tfidf_matrix)[0]
+        
+        # 4. Fusion Math: Combine scores (60% Dense, 40% Sparse)
+        final_scores = (0.6 * dense_scores) + (0.4 * sparse_scores)
+        
+        # 5. Greedy Budget Selection
+        scored_unprotected = sorted(zip(unprotected, final_scores), key=lambda x: x[1], reverse=True)
+        for atom, score in scored_unprotected:
+            cost = len(atom.content.split())
+            if used_tokens + cost <= current_budget:
+                selected.append(atom)
+                used_tokens += cost
+                
+        return selected
 
     async def _execute_agent(self, agent_name: str, query: str, depth: int = 1) -> str:
         """Standard Agent Execution"""
@@ -140,29 +231,81 @@ class OrchestratorEngine:
         except Exception as e:
             return f"Error executing agent: {e}"
 
-    async def _resolve_dependencies(self, query: str, depends_on: List[Any], previous_results: Dict[str, Any], ablation_mode: str = "adaptive") -> str:
+    # async def _resolve_dependencies(self, query: str, depends_on: List[Any], previous_results: Dict[str, Any], ablation_mode: str = "adaptive", downstream_agent: str = "rag") -> str:
+    #     if not depends_on or not self.llm: 
+    #         return query
+        
+    #     context = "\n".join([f"--- Result ---\n{v}" for k, v in previous_results.items() if any(str(dep) in k for dep in depends_on)])
+        
+    #     if ablation_mode == "none": return query 
+    #     if ablation_mode == "raw": return f"{query}\n\n[UPSTREAM CONTEXT]:\n{context}"
+
+    #     if ablation_mode == "adaptive":
+    #         atoms = atomize_output(context)
+    #         if getattr(config.Config, "CONTEXT_ROUTING_MODE", "light") == "heavy" and self.embedder:
+                
+    #             # 🚀 Pass the downstream agent type to apply the correct manifest!
+    #             selected_atoms = self._score_and_select_atoms(atoms, query, downstream_agent)
+                
+    #             code_blocks = [a.content for a in selected_atoms if a.type == AtomType.CODE_BLOCK]
+    #             entities = list(set([a.content for a in selected_atoms if a.type == AtomType.NAMED_ENTITY]))
+    #             prose = [a.content for a in selected_atoms if a.type == AtomType.PROSE_CLAIM]
+                
+    #             context_block = ""
+    #             if code_blocks: context_block += "### Upstream Code Artifacts\n" + "\n".join(code_blocks) + "\n\n"
+    #             if entities: context_block += "### Key Technical Entities\n" + ", ".join(entities[:10]) + "\n\n"
+    #             if prose: context_block += "### Relevant Supporting Evidence\n" + "\n".join(f"- {c}" for c in prose) + "\n\n"
+                
+    #             return f"{context_block}---\n## Your Task\n{query}\n"
+    #         else:
+    #             return build_rigid_prompt(original_query=query, raw_context=context)
+            
+    #     return query
+
+    async def _resolve_dependencies(self, query: str, depends_on: List[Any], previous_results: Dict[str, Any], ablation_mode: str = "adaptive", downstream_agent: str = "rag") -> str:
         if not depends_on or not self.llm: 
             return query
         
-        # Combine the context from parent nodes
         context = "\n".join([f"--- Result ---\n{v}" for k, v in previous_results.items() if any(str(dep) in k for dep in depends_on)])
         
-        # PROTOCOL A: Isolated (No Communication)
-        if ablation_mode == "none":
-            return query 
+        if ablation_mode == "none": return query 
+        if ablation_mode == "raw": return f"{query}\n\n[UPSTREAM CONTEXT]:\n{context}"
 
-        # PROTOCOL B: Raw Appending (Blind Passing)
-        if ablation_mode == "raw":
-            return f"{query}\n\n[UPSTREAM CONTEXT]:\n{context}"
-
-        # PROTOCOL C: Adaptive Injection (The New, Safe LLM Weaver)
         if ablation_mode == "adaptive":
-            # 🚀 Use the new deterministic atomizer instead of an LLM!
-            # It mathematically guarantees the original query is NEVER deleted.
-            rigid_query = build_rigid_prompt(original_query=query, raw_context=context)
-            return rigid_query
-                        
-        # Fallback if an unknown mode is passed
+            # 🚀 NEW: The Dynamic Routing Gateway
+            # 1. Look up the downstream agent's safe token budget
+            from .adaptive_got_dag import AGENT_MANIFESTS # Ensure this is imported or defined in engine.py
+            manifest = AGENT_MANIFESTS.get(downstream_agent, AGENT_MANIFESTS["rag"])
+            budget_limit = manifest.token_budget
+            
+            # 2. Estimate upstream token count (approx 4 chars per token)
+            upstream_token_count = len(context) // 4
+            
+            # 3. THE BYPASS VALVE: If context is small, use RAW to preserve prose!
+            if upstream_token_count <= budget_limit:
+                print(f"      [Gateway] Context ({upstream_token_count} tok) fits in {downstream_agent.upper()} budget ({budget_limit} tok). Bypassing CUGCR -> RAW Passing.")
+                return f"{query}\n\n[UPSTREAM CONTEXT]:\n{context}"
+                
+            # 4. CUGCR EMERGENCY VALVE: If context is too big, trigger the Heavy Math!
+            print(f"      [Gateway] Context ({upstream_token_count} tok) EXCEEDS {downstream_agent.upper()} budget ({budget_limit} tok). Triggering CUGCR Compression.")
+            atoms = atomize_output(context)
+            if getattr(config.Config, "CONTEXT_ROUTING_MODE", "light") == "heavy" and self.embedder:
+                
+                selected_atoms = self._score_and_select_atoms(atoms, query, downstream_agent)
+                
+                code_blocks = [a.content for a in selected_atoms if a.type == AtomType.CODE_BLOCK]
+                entities = list(set([a.content for a in selected_atoms if a.type == AtomType.NAMED_ENTITY]))
+                prose = [a.content for a in selected_atoms if a.type == AtomType.PROSE_CLAIM]
+                
+                context_block = ""
+                if code_blocks: context_block += "### Upstream Code Artifacts\n" + "\n".join(code_blocks) + "\n\n"
+                if entities: context_block += "### Key Technical Entities\n" + ", ".join(entities[:10]) + "\n\n"
+                if prose: context_block += "### Relevant Supporting Evidence\n" + "\n".join(f"- {c}" for c in prose) + "\n\n"
+                
+                return f"{context_block}---\n## Your Task\n{query}\n"
+            else:
+                return build_rigid_prompt(original_query=query, raw_context=context)
+            
         return query
 
     async def _gpt_as_judge(self, user_input: str, final_answer: str) -> str:
@@ -282,7 +425,7 @@ class OrchestratorEngine:
                     prev_results = {f"Task {p.task.id}": p.result for p in parent_nodes if p.result}
                     combined_context = "\n".join(prev_results.values())
                     
-                    resolved_query = await self._resolve_dependencies(query, node.parent_ids, prev_results, ablation_mode)
+                    resolved_query = await self._resolve_dependencies(query, node.parent_ids, prev_results, ablation_mode, downstream_agent=node.task.agent)
                     
                     # Log the injection event
                     current_wave = len(got_orchestrator.dag.wave_scores) + 1 if got_orchestrator.dag else 1

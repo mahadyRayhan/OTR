@@ -104,7 +104,11 @@ def generate_paper_metrics(json_path="experiment_telemetry.json"):
         for r in runs:
             latencies.append(r.get("latency_seconds", 0))
             for edge in r.get("communication_edges",[]):
-                total_tokens += edge.get("context_token_count", 0)
+                # 🚀 THE FIX: If mode is NONE, 0 tokens made it through the door!
+                if mode == "none":
+                    total_tokens += 0
+                else:
+                    total_tokens += edge.get("context_token_count", 0)
             
             # 5. Recovery Rate (Failed mid-run, but graph recovered to >= 8.0)
             had_failure = any((n.get("quality_score") or 1.0) < 0.75 for n in r.get("got_dag_nodes",[]))

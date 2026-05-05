@@ -36,3 +36,8 @@ class Config:
     - 'code' : Writing Python scripts, pipeline code (Snakemake/Nextflow), code generation, debugging.
     - 'cloud' : AWS, cloud deployment, infrastructure design (Terraform/Docker/Kubernetes).
     """
+    # ---------------------------------------------------------
+    # CONTEXT ROUTING ALGORITHM
+    # ---------------------------------------------------------
+    # Options: "light" (Regex only - fast) or "heavy" (Dense+Sparse Semantic Embeddings - slow but accurate)
+    CONTEXT_ROUTING_MODE = "heavy"

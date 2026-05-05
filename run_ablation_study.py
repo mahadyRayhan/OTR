@@ -28,6 +28,12 @@ BENCHMARK_QUERIES =[
     "Identify the standard file format for storing genetic variants. Then, write a Python script using the 'pysam' library to extract the allele frequencies from it, and explain what a 'VCF header' does."
 ]
 
+# BENCHMARK_QUERIES =[
+#     "What are the key mathematical differences between global alignment (Needleman-Wunsch) and local alignment (Smith-Waterman)? Based on those differences, write a Biopython script that executes a local alignment between two sample DNA sequences.",
+#     "Find 2 human experts who have published recent papers on 'RNA-seq Splice-Aware Alignment'. Then, explain the primary algorithm those experts use. Finally, write a bash script that downloads the tool associated with that algorithm.",
+#     "What is the standard text file format used for storing unaligned sequencing reads? Find a Python package designed to parse it, and write a script using that package to count the number of reads."
+# ]
+
 async def run_study():
     engine = OrchestratorEngine()
     modes = ["none", "raw", "adaptive"]
