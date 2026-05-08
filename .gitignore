@@ -132,3 +132,6 @@ Thumbs.db
 .env
 .env.*
 *.json
+*.zip
+*chroma_db
+logs

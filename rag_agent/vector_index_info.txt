@@ -1,0 +1,138 @@
+Total papers indexed: 105
+
+By source:
+  unknown: 105
+
+Top 10 journals:
+  7x  bioRxiv
+  3x  Frontiers in Immunology
+  3x  Journal of Neuroscience
+  2x  Scientific Reports
+  2x  PLoS Comput. Biol.
+  2x  Hippocampus
+  2x  BMC Bioinformatics
+  2x  Nature Biotechnology
+  2x  Nucleic Acids Research
+  2x  Advancement of science
+
+By year:
+  2026: 4 papers
+  2025: 37 papers
+  2024: 15 papers
+  2023: 10 papers
+  2022: 8 papers
+  2021: 7 papers
+  2020: 5 papers
+  2019: 6 papers
+  2018: 3 papers
+  2017: 4 papers
+
+With full abstract: 105/105
+With open access URL: 60/105
+
+All paper titles:
+  [1] Plateau potentials are instructive signals for behavioral timescale synaptic pla
+  [2] In silico investigation of the puzzling dopamine effects on excitability and syn
+  [3] Muscarinic Regulation of Spike Timing Dependent Synaptic Plasticity in the Hippo
+  [4] A memristive plasticity model of voltage-based STDP suitable for recurrent bidir
+  [5] The functional role of sequentially neuromodulated synaptic plasticity in behavi
+  [6] Long-term population spike-timing-dependent plasticity promotes synaptic tagging
+  [7] Long vs short-term synaptic learning rules after optogenetic spike-timing-depend
+  [8] The Role of Plasticity in Replay: Stability Through Anti‐Hebbian Rules
+  [9] Cholesterol depletion inhibits BDNF-dependent spike timing-dependent plasticity 
+  [10] Synaptic transistor with multiple biological functions based on metal-organic fr
+  [11] Computational modeling of heterosynaptic plasticity in the hippocampus
+  [12] Dopamine regulates intrinsic excitability thereby gating successful induction of
+  [13] CRISPR base editing of cis-regulatory elements enables the perturbation of neuro
+  [14] Web-based design and analysis tools for CRISPR base editing
+  [15] CRISPR DNA base editors with reduced RNA off-target and self-editing activities
+  [16] Selict-seq profiles genome-wide off-target effects in adenosine base editing
+  [17] Recent Advancements in Reducing the Off-Target Effect of CRISPR-Cas9 Genome Edit
+  [18] Off-target Editing by CRISPR-guided DNA base editors.
+  [19] Adenine Base Editor Ribonucleoproteins Delivered by Lentivirus-Like Particles Sh
+  [20] A dual-deaminase CRISPR base editor enables concurrent adenine and cytosine edit
+  [21] Rapid two-step target capture ensures efficient CRISPR-Cas9-guided genome editin
+  [22] Mitochondrial base editor DdCBE causes substantial DNA off-target editing in nuc
+  [23] Latest Developed Strategies to Minimize the Off-Target Effects in CRISPR-Cas-Med
+  [24] CRISPR base editors: genome editing without double-stranded breaks
+  [25] Engineered lentivirus-derived nanoparticles (LVNPs) for delivery of CRISPR/Cas r
+  [26] Programmable Base Editing of the Sheep Genome Revealed No Genome-Wide Off-Target
+  [27] Enhancing Specificity, Precision, Accessibility, Flexibility, and Safety to Over
+  [28] Combining different CRISPR nucleases for simultaneous knock-in and base editing 
+  [29] Single-cell RNA sequencing reveals the effects of chemotherapy on human pancreat
+  [30] Tumor microenvironment remodeling after neoadjuvant immunotherapy in non-small c
+  [31] Single-cell RNA sequencing explored potential therapeutic targets by revealing t
+  [32] Single-cell RNA sequencing reveals the tumor microenvironment and facilitates st
+  [33] GJB2 Promotes HCC Progression by Activating Glycolysis Through Cytoplasmic Trans
+  [34] XYZeq: Spatially resolved single-cell RNA sequencing reveals expression heteroge
+  [35] Single-Cell RNA-Sequencing Atlas Reveals the Tumor Microenvironment of Metastati
+  [36] Single-cell RNA-sequencing reveals a unique landscape of the tumor microenvironm
+  [37] Single-cell RNA sequencing reveals the communications between tumor microenviron
+  [38] The Application of Single-Cell RNA Sequencing in the Inflammatory Tumor Microenv
+  [39] CXCR4 Expressed by Tumor-Infiltrating B Cells in Gastric Cancer Related to Survi
+  [40] Characterizing tumor biology and immune microenvironment in high-grade serous ov
+  [41] Single-cell RNA sequencing reveals cell subpopulations in the tumor microenviron
+  [42] Integrated analysis of tumor microenvironment features to establish a diagnostic
+  [43] Single-Cell RNA Sequencing Reveals Heterogeneity in the Tumor Microenvironment b
+  [44] Mapping the tumor microenvironment in bladder cancer and exploring the prognosti
+  [45] Single-Cell RNA Sequencing Reveals Multiple Pathways and the Tumor Microenvironm
+  [46] Single-cell RNA sequencing reveals cancer stem-like cells and dynamics in tumor 
+  [47] Integration of pre-trained protein language models with equivariant graph neural
+  [48] iProtDNA-SMOTE: Enhancing protein-DNA binding sites prediction through imbalance
+  [49] Ranking protein-protein models with large language models and graph neural netwo
+  [50] TCR-pMHC Binding Specificity Prediction From Structure Using Graph Neural Networ
+  [51] GraphPLA: A Graph Neural Networks Method to Predict Protein-Ligand Binding Affin
+  [52] EGG: Accuracy Estimation of Individual Multimeric Protein Models Using Deep Ener
+  [53] SE3Graph-PPI:Multiscale Protein-Protein Interaction Prediction Model based on Gr
+  [54] Co-evolution-based Metal-binding Residue Prediction with Graph Neural Networks
+  [55] Predicting the functional state of protein kinases using interpretable graph neu
+  [56] XMolCap: Advancing Molecular Captioning Through Multimodal Fusion and Explainabl
+  [57] E(3) equivariant graph neural networks for robust and accurate protein-protein i
+  [58] Long-distance dependency combined multi-hop graph neural networks for protein–pr
+  [59] MP-GNN: Graph Neural Networks to Identify Moonlighting Proteins
+  [60] GNNfam: utilizing sparsity in protein family predictions using graph neural netw
+  [61] Graph neural networks for molecular dynamics simulations.
+  [62] Enhancing Protein Function Prediction Through the Fusion of Multi-Type Biologica
+  [63] Graph neural network-based prediction of protein - protein interactions with mol
+  [64] KIF13A drives AMPA receptor synaptic delivery for long-term potentiation via end
+  [65] Postsynaptic Density 95 controls AMPA Receptor Incorporation during Long-Term Po
+  [66] Developmental perfluorooctane sulfonate exposure inhibits long-term potentiation
+  [67] Long-term potentiation is independent of the C-tail of the GluA1 AMPA receptor s
+  [68] CPEB2 Activates GRASP1 mRNA Translation and Promotes AMPA Receptor Surface Expre
+  [69] Selective Phosphorylation of AMPA Receptor Contributes to the Network of Long-Te
+  [70] Coupled feedback loops maintain synaptic long-term potentiation: A computational
+  [71] The AMPA receptor positive allosteric modulator S 47445 rescues in vivo CA3‐CA1 
+  [72] A Pathway-Specific Function for Different AMPA Receptor Subunits in Amygdala Lon
+  [73] Ca2+ Permeable AMPA Receptor Induced Long-Term Potentiation Requires PI3/MAP Kin
+  [74] mirrorCheck: an R package facilitating informed use of DESeq2’s lfcShrink() func
+  [75] PATH-73. Cholesterol metabolism in esophageal cancer brain metastases: insights 
+  [76] 500 Single-Nucleus RNA Sequencing Reveals Mechanism for Multiple Recurrent Menin
+  [77] Association of differential expression of genes with survival and relapse in pat
+  [78] consexpressionR: an R package for consensus differential gene expression analysi
+  [79] Synthetic messenger RNA vaccines and transcriptomic dysregulation: Evidence from
+  [80] Abstract 5455: RNA-seq profiling identifies FOX genes as potential CRC biomarker
+  [81] Antibody Mediated Rejection and T-cell Mediated Rejection Molecular Signatures U
+  [82] Novel hypoxia- and lactate metabolism-related molecular subtyping and prognostic
+  [83] Transcriptional Profiling of Patients With Fuchs Endothelial Corneal Dystrophy W
+  [84] Abstract 4316: Co-alterations in PIK3CA and ARID1A lead to greater sensitivity t
+  [85] Abstract 4368246: Platelet Transcriptomic for Coronary Artery Disease Diagnosis 
+  [86] Chronic Restraint Stress Misaligns Corneal Clock via β-Adrenergic and Glucocorti
+  [87] Neutrophil extracellular trap-derived elongated cell-free DNA and type I interfe
+  [88] 1345 Correlates of Neural Signaling Elucidate Survival Benefit in Gliomas
+  [89] P123 Genomic analysis of skin biopsies differentiates major antinuclear autoanti
+  [90] DDDR-78. Identifying common transcriptional mechanisms in treatment-resistant gl
+  [91] Dentate gyrus is needed for memory retrieval
+  [92] Cold memories control whole-body thermoregulatory responses
+  [93] The search for a hippocampal engram
+  [94] Imaging human engrams using 7 Tesla magnetic resonance imaging
+  [95] Synaptic architecture of a memory engram in the mouse hippocampus.
+  [96] Destabilization of fear memory by Rac1-driven engram-microglia communication in 
+  [97] Memory engram synapse 3D molecular architecture visualized by cryoCLEM-guided cr
+  [98] Memory engram synapse 3D macromolecular architecture visualized by cryoCLEM-guid
+  [99] Transgenerational Inheritance of Odor-Specific Fear Memory: Engram Cell Analysis
+  [100] On the origin of memory neurons in the human hippocampus.
+  [101] Mystery of the Memory Engram: History, current knowledge, and unanswered questio
+  [102] Hippocampal DNA methylation promotes contextual fear memory persistence by facil
+  [103] Posttraining noradrenergic stimulation maintains hippocampal engram reactivation
+  [104] Influences of Paternal Fear Conditioning Experience in the F1-Offspring Hippocam
+  [105] Hippocampus alters visual representation to encode new memory.

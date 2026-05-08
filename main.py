@@ -136,7 +136,7 @@ async def main():
             print("\n==================================================")
             print("🤖 SYSTEM SYNTHESIS:")
             print("==================================================")
-            print(output["final_answer"])
+            print(output["final_answer"][:500])
             print("\n--------------------------------------------------")
             print(f"🎖️  SYSTEM JUDGE: {output['judge_score']}")
             print("==================================================")

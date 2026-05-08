@@ -494,9 +494,17 @@ def _infer_dependencies(nodes: List[TaskNode]) -> List[TaskNode]:
     dependent steps refer to the output of an earlier step.
     """
     for i, node in enumerate(nodes):
+        # Always make CODE and DEPLOY depend on the immediate previous node 
+        # so they receive the biological context or the code to deploy!
+        if node.qdmr_op in [QDMROp.CODE.value, QDMROp.DEPLOY.value]:
+            if i > 0:
+                node.depends_on = [nodes[i-1].id]
+                continue
+                
+        # Standard QDMR dependency logic for other nodes
         if node.qdmr_op and QDMROp(node.qdmr_op) in _REFERENT_DEPENDENT_OPS:
             if i == 0:
-                continue  # nothing before this node
+                continue
             for j in range(i - 1, -1, -1):
                 if not nodes[j].depends_on:
                     node.depends_on = [nodes[j].id]

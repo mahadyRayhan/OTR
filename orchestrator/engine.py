@@ -18,7 +18,8 @@ from .evaluation.communication_evaluator import CommunicationEvaluator
 # Import the GoT Classes
 from .adaptive_got_dag import AdaptiveGoTOrchestrator, GoTNode, DepthBudget, GoTOp
 
-from rag_agent.agent import call_rag_agent
+from xtra.agent import call_rag_agent
+# from rag_agent.agent import call_rag_agent, KnowledgeBase
 from scholar_agent.agent import call_scholar_agent
 from cloud_agent.agent import call_cloud_agent
 from code_agent.agent import call_code_agent
@@ -213,7 +214,17 @@ class OrchestratorEngine:
         
         try:
             if agent_name == "code": return await call_code_agent(clean_query, strategy, depth, agent_registry)
-            if agent_name == "cloud": return await call_cloud_agent(clean_query, strategy, depth, agent_registry)
+            if agent_name == "cloud":
+                # Get the profile constraint string we generated earlier in the function
+                profile_str = user_profiler.get_style_guideline(use_session=False) if config.Config.USE_PROFILER else ""
+                
+                return await call_cloud_agent(
+                    user_input=clean_query, 
+                    strategy=strategy, 
+                    depth=depth, 
+                    agent_registry=agent_registry,
+                    user_profile_str=profile_str # <--- ADD THIS!
+                )
             if agent_name == "scholar":
                 limit = 1
                 # Normalize spelled-out numbers 1-5 to digits so the regex catches them
@@ -226,7 +237,7 @@ class OrchestratorEngine:
                 if match: limit = int(match.group(1))
                 return await call_scholar_agent(clean_query, is_collaboration=False, limit=limit, strategy=strategy, depth=depth, agent_registry=agent_registry)
             else: # RAG
-                rag_data = await call_rag_agent(clean_query, strategy=strategy, depth=depth, agent_registry=agent_registry)
+                rag_data = await call_rag_agent(user_input=clean_query, strategy=strategy, depth=depth, agent_registry=agent_registry)
                 return f"Source: {rag_data.get('source_used')}\nAnswer: {rag_data['answer']}"
         except Exception as e:
             return f"Error executing agent: {e}"
@@ -274,7 +285,7 @@ class OrchestratorEngine:
         if ablation_mode == "adaptive":
             # 🚀 NEW: The Dynamic Routing Gateway
             # 1. Look up the downstream agent's safe token budget
-            from .adaptive_got_dag import AGENT_MANIFESTS # Ensure this is imported or defined in engine.py
+            # from .adaptive_got_dag import AGENT_MANIFESTS # Ensure this is imported or defined in engine.py
             manifest = AGENT_MANIFESTS.get(downstream_agent, AGENT_MANIFESTS["rag"])
             budget_limit = manifest.token_budget
             
@@ -385,6 +396,10 @@ class OrchestratorEngine:
                     
                     Agent Outputs:
                     {full_context}
+                    
+                    CRITICAL INSTRUCTIONS: 
+                    1. Do NOT summarize or truncate any Python or Bash code blocks. Copy them verbatim.
+                    2. If any Agent Output contains an "⚠️ AI EXTRAPOLATION WARNING" or "⚠️ AI GENERATED CODE WARNING", you MUST include that warning verbatim in your final synthesized response so the user is aware.
                     
                     {style_guideline}
                     """

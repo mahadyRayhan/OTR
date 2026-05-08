@@ -1,0 +1,46 @@
+# ── Core Framework ────────────────────────────────────────────────────────────
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+python-dotenv
+httpx
+
+# ── LLM Providers ─────────────────────────────────────────────────────────────
+anthropic              # Claude
+openai    # GPT-4o, o1, o3-mini
+google-genai     # Gemini
+# Ollama uses aiohttp (already included below) — no extra package needed
+
+# ── Embeddings & Vector Store ─────────────────────────────────────────────────
+faiss-cpu
+sentence-transformers
+transformers
+torch
+numpy
+
+# ── Topic Modeling ────────────────────────────────────────────────────────────
+bertopic
+umap-learn
+hdbscan
+scikit-learn
+
+# ── External APIs ─────────────────────────────────────────────────────────────
+biopython       # PubMed / NCBI Entrez
+requests
+aiohttp
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+pandas
+orjson
+
+# ── Logging & Observability ───────────────────────────────────────────────────
+structlog
+rich
+
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest
+pytest-asyncio
+pytest-cov
+httpx
