@@ -135,3 +135,9 @@ Thumbs.db
 *.zip
 *chroma_db
 logs
+raw_telemetry_old
+code_agent/generated_scripts
+raw_telemetry
+cloud_agent/generated_infrastructure
+xtra
+*.pyc
