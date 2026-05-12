@@ -9,7 +9,7 @@ class Config:
     # ORCHESTRATION SETTINGS
     # ---------------------------------------------------------
     # Options: "plan_and_solve", "llm_compiler", "qdmr_rule", "coverage", "ultimate_neuro_symbolic", "auto"
-    DEFAULT_DECOMPOSER = "ultimate_neuro_symbolic"
+    DEFAULT_DECOMPOSER = "neuro_rule"
     
     # 🚀 NEW: THE DAG BUILDER
     # Options: "topological_dag", "parallel_dag", "got_dag"

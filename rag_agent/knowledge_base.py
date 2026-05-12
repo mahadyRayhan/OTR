@@ -43,7 +43,7 @@ from typing import Any
 import aiohttp
 import numpy as np
 
-from config import settings
+from rag_agent.rag_config import settings
 
 logger = logging.getLogger(__name__)
 

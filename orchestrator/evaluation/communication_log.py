@@ -19,7 +19,8 @@ class EdgeLog:
     # Real-time evaluated metrics
     context_relevance: Optional[float] = None
     utilization_score: Optional[float] = None
-    dependency_accuracy: Optional[bool] = None
+    dependency_accuracy: bool = True
+    low_confidence: bool = False   # True when CRS gate blocked CUGCR
 
 class CommunicationTracker:
     def __init__(self):
@@ -34,11 +35,11 @@ class CommunicationTracker:
         if self.tokenizer: return len(self.tokenizer.encode(text))
         return len(text.split())
 
-    def log_injection(self, wave: int, from_ids: List[str], to_id: str, to_agent: str, context: str, orig_query: str, resolved_query: str) -> EdgeLog:
+    def log_injection(self, wave: int, from_ids: List[str], to_id: str, to_agent: str, context: str, orig_query: str, resolved_query: str, low_confidence: bool = False) -> EdgeLog:
         log = EdgeLog(
             wave_number=wave, from_node_ids=from_ids, to_id=to_id, to_agent=to_agent,
             raw_context_injected=context, context_token_count=self._count_tokens(context),
-            original_query=orig_query, resolved_query=resolved_query
+            original_query=orig_query, resolved_query=resolved_query, low_confidence=low_confidence
         )
         self.logs.append(log)
         return log

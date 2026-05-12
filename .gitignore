@@ -141,3 +141,4 @@ raw_telemetry
 cloud_agent/generated_infrastructure
 xtra
 *.pyc
+*.png

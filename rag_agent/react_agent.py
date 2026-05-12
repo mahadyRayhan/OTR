@@ -39,7 +39,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from config import settings
+# from config import settings
+from .rag_config import settings
 from llm_provider import LLMProvider
 from knowledge_base import KnowledgeBase, KnowledgeLandscape, Paper, Topic
 

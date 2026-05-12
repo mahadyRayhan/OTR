@@ -1,5 +1,5 @@
 """
-config.py — Centralised configuration via Pydantic Settings.
+rag_config.py — Centralised configuration via Pydantic Settings.
 
 All values are loaded from environment variables (or the .env file).
 Import the singleton `settings` anywhere in the project.
@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # ── Active LLM Provider ──────────────────────────────────────────────────
     llm_provider: str = Field(
-        "claude",
+        "gemini",
         description="Active LLM provider: claude | openai | gemini | ollama",
     )
     llm_model: str = Field(
@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # ── Google Gemini ─────────────────────────────────────────────────────────
     gemini_api_key: str = Field("", description="Google Gemini API key")
     gemini_model: str = Field(
-        "gemini-2.0-flash",
+        "gemini-2.5-flash",
         description="Gemini model (used when llm_provider=gemini)",
     )
 
@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     react_stop_threshold: float = Field(
         0.85, description="Stop the chain when top-result confidence exceeds this"
     )
-    confidence_threshold: float = Field(0.72, description="Minimum score to include a result")
+    confidence_threshold: float = Field(0.50, description="Minimum score to include a result")
 
     # ── Application ──────────────────────────────────────────────────────────
     app_host: str = Field("0.0.0.0")
@@ -116,7 +116,7 @@ class Settings(BaseSettings):
         return self.embedding_device in ("cuda", "mps")
 
     def build_llm_provider(self, provider_override=None):
-        from llm_provider import get_provider
+        from .llm_provider import get_provider
         name = provider_override or self.llm_provider
         model_override = self.llm_model or None
         if name in ("claude", "anthropic"):

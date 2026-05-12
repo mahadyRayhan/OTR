@@ -131,7 +131,8 @@ class ClaudeProvider(LLMProvider):
 
         api_key = self._api_key
         if not api_key:
-            from config import settings
+            # from config import settings
+            from .rag_config import settings
             api_key = settings.anthropic_api_key
 
         client = anthropic.AsyncAnthropic(api_key=api_key)
@@ -203,7 +204,8 @@ class OpenAIProvider(LLMProvider):
 
         api_key = self._api_key
         if not api_key:
-            from config import settings
+            # from config import settings
+            from .rag_config import settings
             api_key = settings.openai_api_key
 
         client_kwargs: dict[str, Any] = {"api_key": api_key}
@@ -267,7 +269,8 @@ class GeminiProvider(LLMProvider):
 
         api_key = self._api_key
         if not api_key:
-            from config import settings
+            # from config import settings
+            from .rag_config import settings
             api_key = settings.gemini_api_key
 
         client = genai.Client(api_key=api_key)
