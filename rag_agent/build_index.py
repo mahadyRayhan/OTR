@@ -15,20 +15,53 @@ from knowledge_base import KnowledgeBase, Paper
 from config import settings
 
 QUERIES = [
-    # General bio/neuro topics (from your original list)
-    "synaptic plasticity STDP hippocampus",
-    "CRISPR base editing off-target",
-    "single cell RNA sequencing tumor microenvironment",
-    "protein structure prediction AlphaFold",
-    "graph neural networks protein biology",
-    
-    # 🚀 NEW TOPICS: Specifically added to support our Benchmark questions
-    "Needleman-Wunsch global sequence alignment algorithm mathematical formulation",
-    "Smith-Waterman local sequence alignment dynamic programming matrix",
-    "Biopython pairwise2 module sequence alignment tutorial Python",
-    "Nextflow pipeline RNA-seq FastQC Trimmomatic",
-    "Kallisto RNA-seq pseudoalignment algorithm differences",
-    "Louvain Leiden community detection algorithm single cell RNA-seq Scanpy"
+    # Single-cell / Scanpy
+    "Scanpy single-cell RNA sequencing clustering analysis",
+    "Leiden community detection single-cell transcriptomics",
+    "PCA UMAP dimensionality reduction single-cell",
+    "differential expression analysis scRNA-seq marker genes",
+    "Harmony batch effect correction single-cell integration",
+    "MAGIC imputation single-cell RNA sequencing",
+    "tumor microenvironment single-cell RNA sequencing breast cancer",
+    "PCA UMAP dimensionality reduction single-cell transcriptomics",
+    "Scanpy Wilcoxon rank sum test marker genes cell clusters",      
+    "Leiden algorithm graph modularity community detection",          
+    "single-cell RNA-seq dimensionality reduction t-SNE diffusion",  
+
+    # Sequence analysis
+    "Kallisto pseudoalignment RNA-seq quantification",
+    "FASTQ file format sequencing reads quality scores",
+    "FastQC Trimmomatic RNA-seq preprocessing pipeline",
+    "Needleman-Wunsch Smith-Waterman sequence alignment algorithms",
+    "Kallisto pseudoalignment versus STAR aligner RNA-seq",          
+    "FASTQ quality score Phred encoding Illumina sequencing",        
+
+    # Protein / structural biology
+    "AlphaFold protein structure prediction deep learning",
+    "Rosetta PyRosetta protein folding de novo",
+    "AlphaFold2 versus Rosetta protein structure comparison",         
+    "protein structure prediction methods deep learning benchmark",   
+
+    # CRISPR
+    "CRISPR base editing off-target effects detection",
+    "CRISPR base editing GUIDE-seq CIRCLE-seq off-target detection", 
+    "adenine cytosine base editor off-target genomic effects",       
+
+    # Proteomics
+    "mass spectrometry proteomics MaxQuant data processing",
+
+    # Neuroscience
+    "synaptic plasticity STDP hippocampus LTP",
+    "AMPA receptor trafficking long-term potentiation",
+    "calcium signaling synaptic plasticity STDP hippocampus",        
+
+    # Graph neural networks
+    "graph neural networks protein structure biology",
+    "graph neural networks protein interaction network GNN biology",  
+
+    # RNA-seq alignment (covers coreference_explanation gap)
+    "splice-aware RNA-seq alignment STAR HISAT2 algorithm",         
+    "RNA-seq splice junction alignment intron splicing detection",    
 ]
 
 S2_FIELDS = "title,authors,year,venue,abstract,externalIds,openAccessPdf"
