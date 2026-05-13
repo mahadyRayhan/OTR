@@ -15,14 +15,14 @@ Returns:
 """
 
 from __future__ import annotations
- 
+
 import asyncio
 import logging
 import re
 from typing import Any
- 
-from knowledge_base import KnowledgeBase, Paper
-from config import settings
+
+from rag_agent.knowledge_base import KnowledgeBase, Paper
+from rag_agent.config import settings
  
 logger = logging.getLogger(__name__)
  
