@@ -21,8 +21,8 @@ import logging
 import re
 from typing import Any
  
-from rag_agent.knowledge_base import KnowledgeBase, Paper
-from rag_agent.rag_config import settings
+from knowledge_base import KnowledgeBase, Paper
+from config import settings
  
 logger = logging.getLogger(__name__)
  
@@ -42,7 +42,7 @@ def _build_context(papers: list[Paper], max_papers: int = 5) -> tuple[str, str]:
     return context, source_titles
  
  
-async def _llm(provider, prompt: str, max_tokens: int = 1024) -> str:
+async def _llm(provider, prompt: str, max_tokens: int = 8192) -> str:
     try:
         response = await provider.complete(
             messages=[{"role": "user", "content": prompt}],
@@ -59,27 +59,33 @@ async def _llm(provider, prompt: str, max_tokens: int = 1024) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
  
 async def _cot(query: str, context: str, provider, depth: int) -> str:
-    answer = await _llm(provider,
+
+    answer = await _llm(
+        provider,
         f"You are a scientific expert. Based on the research papers below, "
         f"answer this question thoroughly: {query}\n\n"
         f"Research papers:\n{context}\n\n"
         f"Provide a detailed answer grounded in the papers above."
     )
- 
+
     if depth < 2:
         return answer
- 
-    answer = await _llm(provider,
-        f"You previously answered this question: {query}\n\n"
-        f"Your answer was:\n{answer}\n\n"
-        f"Using these research papers as reference:\n{context}\n\n"
-        f"Write an improved, more complete answer."
+
+    answer = await _llm(
+        provider,
+        f"You are improving a scientific answer. Question: {query}\n\n"
+        f"Current answer:\n{answer}\n\n"
+        f"Research papers:\n{context}\n\n"
+        f"Identify specifically what is missing or incorrect, then write "
+        f"a complete improved answer that fills those gaps. "
+        f"Ground every claim in the papers above."
     )
- 
+
     if depth < 3:
         return answer
- 
-    return await _llm(provider,
+
+    return await _llm(
+        provider,
         f"Write a final, polished answer to: {query}\n\n"
         f"Research papers:\n{context}\n\n"
         f"Previous reasoning:\n{answer}\n\n"
@@ -199,7 +205,7 @@ async def _judge(query: str, answer: str, context: str, provider) -> str:
             f"Reference papers: {context[:600]}\n\n"
             f"Give a score out of 10 and one sentence of justification. "
             f"Format: 'Score: X/10 - [reason]'",
-            max_tokens=128,
+            max_tokens=512,
         )
         return result
     except Exception as e:
