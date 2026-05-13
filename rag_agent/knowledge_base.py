@@ -634,6 +634,7 @@ class KnowledgeBase:
             Used to bias re-ranking toward review / methodology / primary research.
         """
         k = max_results or settings.final_top_k
+        # logger.warning("search_publications : Value of K '%s'", k)
 
         # 1. Parallel fetch from all sources
         faiss_task = asyncio.create_task(self._faiss_papers(query))
@@ -646,6 +647,7 @@ class KnowledgeBase:
 
         # 2. Merge & deduplicate (Fix #6 — PMID-first deduplication)
         all_papers = self._deduplicate(faiss_papers + pubmed_papers + s2_papers)
+        # logger.warning("all_papers : Paper found '%s'", len(all_papers))
 
         # Normalise None abstracts from live API responses
         for p in all_papers:
@@ -658,8 +660,13 @@ class KnowledgeBase:
         # 4. Cross-encoder re-ranking
         ranked = self.reranker.rerank(biased_query, all_papers)
 
+        # logger.warning("p.score :'%s'", p)
+        # logger.warning("settings.confidence_threshold :'%s'", settings.confidence_threshold)
         # 5. Filter by confidence threshold
         filtered = [p for p in ranked if p.score >= settings.confidence_threshold]
+        # logger.warning("------------------------------------------------------------")
+        # logger.warning("filtered : Paper found '%s'", filtered)
+        # logger.warning("------------------------------------------------------------")
         return filtered[:k]
 
     def get_tools_for_topic(self, topic_name: str) -> list[str]:

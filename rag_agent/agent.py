@@ -19,10 +19,22 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import os
 from typing import Any
 
 from rag_agent.knowledge_base import KnowledgeBase, Paper
-from rag_agent.config import settings
+from rag_agent.rag_config import settings
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# 🚀 ADD THIS TO FORCE LOAD THE API KEYS
+from dotenv import load_dotenv
+load_dotenv()
  
 logger = logging.getLogger(__name__)
  
@@ -229,21 +241,34 @@ async def call_rag_agent(
 ) -> dict[str, Any]:
     if strategy not in _STRATEGIES:
         raise ValueError(f"Unknown strategy '{strategy}'. Choose from: {list(_STRATEGIES.keys())}")
- 
+    
+    kb = KnowledgeBase()
+    kb.load()
     provider = settings.build_llm_provider()
+    logger.warning("-------------------------------------------------------------")
+    logger.warning("user_input : '%s'", user_input)
+    logger.warning("-------------------------------------------------------------")
     papers = await kb.search_publications(user_input, complexity=complexity)
  
+    # if not papers:
+    #     logger.warning("RAG agent: no papers retrieved for '%s'", user_input)
+    #     answer = await _llm(provider,
+    #         f"You are a scientific expert. Answer comprehensively: {user_input}"
+    #     )
+    #     return {
+    #         "answer": answer,
+    #         "quality": "Score: N/A - No papers retrieved, answer from general knowledge.",
+    #         "strategy": strategy.upper(),
+    #         "source_used": "General LLM Knowledge",
+    #     }
+    
     if not papers:
-        logger.warning("RAG agent: no papers retrieved for '%s'", user_input)
-        answer = await _llm(provider,
-            f"You are a scientific expert. Answer comprehensively: {user_input}"
-        )
-        return {
-            "answer": answer,
-            "quality": "Score: N/A - No papers retrieved, answer from general knowledge.",
-            "strategy": strategy.upper(),
-            "source_used": "General LLM Knowledge",
-        }
+        print("❌ FAISS returned 0 papers above the confidence threshold.")
+        print("💡 FIX: Try lowering 'confidence_threshold' in your config.py or .env file.")
+    else:
+        print(f"✅ Found {len(papers)} papers!")
+        for i, p in enumerate(papers):
+            print(f"  [{i+1}] Score {p.score:.2f} | {p.title[:60]}...")
  
     context, source_titles = _build_context(papers)
     if agent_registry:
