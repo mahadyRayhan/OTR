@@ -24,6 +24,12 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 load_dotenv()
 from orchestrator.engine import OrchestratorEngine
 
+os.environ["GRPC_VERBOSITY"] = "ERROR"
+os.environ["GRPC_TRACE"] = ""
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+import logging
+logging.getLogger("absl").setLevel(logging.ERROR)
+
 # ── Configuration ────────────────────────────────────────────────────────────
 ROOT_DIR = Path(os.path.dirname(__file__)).parent
 OUTPUT_DIR = ROOT_DIR / "raw_telemetry"
