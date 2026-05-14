@@ -49,7 +49,8 @@ class Settings(BaseSettings):
     # ── Google Gemini ─────────────────────────────────────────────────────────
     gemini_api_key: str = Field("", description="Google Gemini API key")
     gemini_model: str = Field(
-        "gemini-2.5-flash",
+        # "gemini-2.5-flash",
+        "gemini-3.1-flash-lite-preview",
         description="Gemini model (used when llm_provider=gemini)",
     )
 
@@ -98,7 +99,7 @@ class Settings(BaseSettings):
     react_stop_threshold: float = Field(
         0.85, description="Stop the chain when top-result confidence exceeds this"
     )
-    confidence_threshold: float = Field(0.50, description="Minimum score to include a result")
+    confidence_threshold: float = Field(-3.00, description="Minimum score to include a result")
 
     # ── Application ──────────────────────────────────────────────────────────
     app_host: str = Field("0.0.0.0")

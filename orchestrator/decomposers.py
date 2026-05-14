@@ -66,13 +66,16 @@ logger = logging.getLogger(__name__)
 
 AGENT_GUIDELINES = """
 AVAILABLE AGENTS & CAPABILITIES:
-1. "rag" - Use for general knowledge, definitions, tool explanations, and concepts in bioinformatics.
+1. "rag" - Use for general knowledge, definitions, tool explanations, concepts, and extracting content
+   FROM a specific named paper, tool, or document.
    - Feature: You MUST append a reasoning strategy to the query.
      - If query asks for a single fact -> append "--strategy=cot"
      - If query asks to verify a claim -> append "--strategy=react"
      - If query is open-ended or asks for multiple items -> append "--strategy=tot"
      - If query asks to compare distinct concepts -> append "--strategy=got"
-2. "scholar" - Use ONLY for finding actual human experts, research papers, citations, and collaborators.
+2. "scholar" - Use ONLY for SEARCHING for actual human experts, researchers, citations, or collaborators.
+   - Use scholar when the task is "find/search for people who work on X" or "find papers about X".
+   - DO NOT use scholar for "retrieve content from a specific named paper" — use "rag" for that.
    - Feature: Always specify the number of experts in the sub_query (e.g., "find 2 experts on X").
 3. "code" - Use for writing Python scripts, debugging, and coding tasks.
 4. "cloud" - Use for AWS, deployment, and infrastructure.
@@ -305,11 +308,23 @@ QDMR_PATTERN_RULES: List[Tuple[re.Pattern, QDMROp]] = [
         re.IGNORECASE,
     ), QDMROp.CODE),
 
+    # ── Named-document content retrieval (must precede EXPERT) ─────────────
+    # "retrieve/extract X from [the] [Name] paper/article/study" is a document
+    # content extraction task → RAG (PROJECT), not a Scholar expert search.
+    (re.compile(
+        r"\b(?:retrieve|extract|fetch|pull)\b.{0,80}?"
+        r"\bfrom\s+(?:the|a)\s+\w[\w\s-]{0,30}?\s+"
+        r"(?:paper|article|study|publication|document)\b",
+        re.IGNORECASE,
+    ), QDMROp.PROJECT),
+
     # ── Expert / paper finding ──────────────────────────────────────────────
     (re.compile(
-        r"\b(expert|researcher|paper|publication|citation|"
+        r"\b(expert|researcher|citation|"
         r"author|journal|who works? on|find.*who|recent study|"
-        r"literature review|bibliograph)\b",
+        r"literature review|bibliograph)\b"
+        r"|"
+        r"\b(?:find|search\s+for|look\s+for)\b.{0,40}?\b(?:paper|publication)\b",
         re.IGNORECASE,
     ), QDMROp.EXPERT),
 
@@ -486,22 +501,27 @@ def _infer_dependencies(nodes: List[TaskNode]) -> List[TaskNode]:
     """
     Heuristic dependency resolution based on QDMR's @@REF@@ convention.
 
-    For each node whose QDMR operation is in _REFERENT_DEPENDENT_OPS,
-    we search backwards for the nearest node that itself has no dependencies
-    (i.e. a root/SELECT task) and assign it as a prerequisite.
+    Acts as a safety net: only fills in depends_on when it is currently empty.
+    This lets NeuroRuleDecomposer call it without overriding dependencies the
+    LLM already set correctly, while still catching cases where the LLM left
+    CODE or CLOUD nodes parentless (e.g. no explicit "based on the above"
+    language in the query).
 
-    This mirrors the reference-resolution step in Wolfson et al. where
-    dependent steps refer to the output of an earlier step.
+    Rules applied only when node.depends_on is empty:
+      - CODE / DEPLOY: always depend on the immediately preceding node so they
+        receive upstream context (biological explanation or script to deploy).
+      - Other QDMR referent-dependent ops (FILTER, PROJECT, etc.): depend on
+        the nearest preceding root node.
     """
     for i, node in enumerate(nodes):
-        # Always make CODE and DEPLOY depend on the immediate previous node 
-        # so they receive the biological context or the code to deploy!
+        if node.depends_on:
+            continue  # LLM or earlier logic already set this — don't override
+
         if node.qdmr_op in [QDMROp.CODE.value, QDMROp.DEPLOY.value]:
             if i > 0:
-                node.depends_on = [nodes[i-1].id]
-                continue
-                
-        # Standard QDMR dependency logic for other nodes
+                node.depends_on = [nodes[i - 1].id]
+            continue
+
         if node.qdmr_op and QDMROp(node.qdmr_op) in _REFERENT_DEPENDENT_OPS:
             if i == 0:
                 continue
@@ -509,6 +529,44 @@ def _infer_dependencies(nodes: List[TaskNode]) -> List[TaskNode]:
                 if not nodes[j].depends_on:
                     node.depends_on = [nodes[j].id]
                     break
+    return nodes
+
+
+def _enforce_cloud_depends_on_code(nodes: List[TaskNode]) -> List[TaskNode]:
+    """
+    Structural correction pass: CLOUD/DEPLOY nodes must depend on CODE nodes,
+    not directly on RAG/SELECT nodes, when CODE nodes exist in the graph.
+
+    The Phase 1 LLM often emits CLOUD depends_on=[rag_id] because the query
+    mentions the RAG topic. This pass overrides that mistake: if a CLOUD node's
+    entire depends_on list resolves to non-CODE nodes, redirect it to the last
+    CODE node before it.
+
+    This pass runs AFTER _infer_dependencies and intentionally overrides
+    existing depends_on when the structural constraint is violated.
+    """
+    _RAG_OPS = {QDMROp.SELECT.value, QDMROp.PROJECT.value, QDMROp.FILTER.value,
+                QDMROp.EXPERT.value, None}
+    id_to_op = {n.id: n.qdmr_op for n in nodes}
+
+    for i, node in enumerate(nodes):
+        if node.qdmr_op not in [QDMROp.DEPLOY.value]:
+            continue
+        # Check if all parents are non-CODE nodes
+        if not node.depends_on:
+            continue
+        all_parents_are_rag = all(id_to_op.get(pid) in _RAG_OPS for pid in node.depends_on)
+        if not all_parents_are_rag:
+            continue  # already depends on a CODE node
+        # Find the last CODE node that precedes this one
+        code_nodes_before = [
+            n for n in nodes[:i]
+            if n.qdmr_op == QDMROp.CODE.value
+        ]
+        if not code_nodes_before:
+            continue
+        last_code = code_nodes_before[-1]
+        node.depends_on = [last_code.id]
     return nodes
 
 
@@ -849,8 +907,10 @@ class CoverageDecomposer(BaseDecomposer):
 #   Wolfson et al. (2020). Break It Down. TACL.
 # ──────────────────────────────────────────────────────────────────────────────
 
-# LLM timeout in seconds for the neural phase
-_NEURAL_PHASE_TIMEOUT_S: float = 15.0
+# LLM timeout in seconds for the neural phase.
+# 15s was too aggressive — complex bioinformatics queries with cold API
+# starts routinely exceed it, causing unnecessary fallback to QDMRRuleDecomposer.
+_NEURAL_PHASE_TIMEOUT_S: float = 45.0
 
 
 class NeuroRuleDecomposer(BaseDecomposer):
@@ -913,7 +973,6 @@ User Query: {query}
         logger.debug("[NeuroRuleDecomposer] Phase 1: neural goal DAG extraction.")
         try:
             prompt = self._PHASE1_PROMPT.format(query=query)
-            # FIX (Issue 8): timeout guard — avoids indefinite block on API hang
             res = await asyncio.wait_for(
                 asyncio.to_thread(model.generate_content, prompt),
                 timeout=_NEURAL_PHASE_TIMEOUT_S,
@@ -939,8 +998,6 @@ User Query: {query}
             return await QDMRRuleDecomposer().decompose(query)
 
         # ── Phase 2: Deterministic agent routing ──────────────────────────────
-        # FIX (Issue 7): Because the prompt enforces one intent per goal, each
-        # goal text is unambiguous for _classify_clause's first-match logic.
         logger.debug("[NeuroRuleDecomposer] Phase 2: deterministic QDMR routing.")
         nodes: List[TaskNode] = []
         for goal in goals:
@@ -959,6 +1016,18 @@ User Query: {query}
                     qdmr_op=op.value,
                 )
             )
+
+        # ── Phase 2b: Dependency safety net ───────────────────────────────────
+        # The LLM may leave CODE or CLOUD parentless when the query lacks
+        # explicit dependency language ("based on this", "using that output").
+        # _infer_dependencies fills those gaps without overriding deps the
+        # LLM already set correctly (see its docstring).
+        nodes = _infer_dependencies(nodes)
+
+        # ── Phase 2c: Structural constraint — CLOUD must chain through CODE ───
+        # The LLM sometimes sets CLOUD depends_on=[rag_node] instead of the
+        # CODE node. _enforce_cloud_depends_on_code corrects this.
+        nodes = _enforce_cloud_depends_on_code(nodes)
 
         return nodes
 

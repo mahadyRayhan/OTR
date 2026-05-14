@@ -68,6 +68,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -221,6 +222,7 @@ class GoTNode:
     judge_reasoning: Optional[str]    = None
     is_expanded:    bool               = False
     children_ids:   List[str]          = field(default_factory=list)
+    elapsed_s:      float              = 0.0
 
     @property
     def is_executed(self) -> bool:
@@ -322,7 +324,7 @@ Question: {question}
 Answer: {answer}
 """.strip()
 
-_JUDGE_TIMEOUT_S: float = 20.0 
+_JUDGE_TIMEOUT_S: float = 45.0
 _JUDGE_WEIGHTS = {"completeness": 0.35, "depth": 0.30, "accuracy": 0.25, "clarity": 0.10}
 
 
@@ -867,31 +869,37 @@ class AdaptiveGoTDAG:
             for wave in waves:
                 for node in wave:
                     if not node.is_executed:
+                        _t0 = time.monotonic()
                         node.result = await executor(node)
+                        node.elapsed_s = round(time.monotonic() - _t0, 2)
                         newly_executed += 1
 
             if newly_executed == 0 and wave_number > 1:
                 logger.info("[GoTDAG] No new nodes to execute. Stopping.")
                 break
 
-            # ── Judge quality of newly executed nodes ─────────────────────────
-            for node in self._nodes.values():
-                if node.is_executed and node.quality_score is None:
-                    if model is not None:
-                        score, reason, failure_mode = await _llm_judge(node.task.query, node.result or "", model)
-                        logger.debug(
-                            "[Judge] Node %s: %.3f — %s", node.node_id, score, reason
-                        )
-                    else:
-                        score = _heuristic_judge(node.task.query, node.result or "")
-                    node.quality_score = score
-                    node.failure_mode = failure_mode  
-                    
-                    # 🚀 NEW: Update the communication tracker with the REAL score!
-                    from .evaluation.communication_log import comm_tracker
+            # ── Judge quality of newly executed nodes (parallelized) ──────────
+            from .evaluation.communication_log import comm_tracker
+            unjudged = [n for n in self._nodes.values()
+                        if n.is_executed and n.quality_score is None]
+            if unjudged:
+                if model is not None:
+                    judge_results = await asyncio.gather(*[
+                        _llm_judge(n.task.query, n.result or "", model)
+                        for n in unjudged
+                    ])
+                    for node, (score, reason, failure_mode) in zip(unjudged, judge_results):
+                        node.quality_score = score
+                        node.failure_mode = failure_mode
+                        logger.debug("[Judge] Node %s: %.3f — %s", node.node_id, score, reason)
+                else:
+                    for node in unjudged:
+                        node.quality_score = _heuristic_judge(node.task.query, node.result or "")
+                        node.failure_mode = FailureMode.UNKNOWN
+                for node in unjudged:
                     for log in comm_tracker.logs:
-                        if log.to_id == node.node_id:       # <--- FIXED!
-                            log.quality_score = score  
+                        if log.to_id == node.node_id:
+                            log.quality_score = node.quality_score
 
             # ── Wave quality summary ──────────────────────────────────────────
             scores = [n.quality_score for n in self._nodes.values()

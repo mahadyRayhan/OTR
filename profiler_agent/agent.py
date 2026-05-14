@@ -433,7 +433,8 @@ class UserProfile:
 # Wraps UserProfile with async LLM refinement and deterministic fallback.
 # ──────────────────────────────────────────────────────────────────────────────
 
-_LLM_TIMEOUT_S: float = 10.0
+# 10s caused frequent timeouts on first API call (cold start + model latency).
+_LLM_TIMEOUT_S: float = 30.0
 
 _LLM_CLASSIFICATION_PROMPT = """
 Analyze this bioinformatics query and determine what kind of response the user wants.

@@ -3,7 +3,8 @@ import asyncio
 import chromadb
 import google.generativeai as genai
 
-GEMINI_MODEL = "gemini-2.5-flash"
+# GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
 
 def _get_model():

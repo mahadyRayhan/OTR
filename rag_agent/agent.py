@@ -117,7 +117,7 @@ async def _tot(query: str, context: str, provider, depth: int) -> str:
         "focus on practical implications and applications",
         "take a critical view of current limitations",
     ]
- 
+
     branches = await asyncio.gather(*[
         _llm(provider,
             f"You are a scientific expert. Answer this question by focusing on "
@@ -128,21 +128,26 @@ async def _tot(query: str, context: str, provider, depth: int) -> str:
         )
         for i in range(num_branches)
     ])
- 
+
+    # At depth=0 only 1 branch is generated — synthesis adds a redundant LLM
+    # call with no new information. Skip it and return the single answer directly.
+    if num_branches == 1:
+        return branches[0]
+
     branch_text = "\n\n---\n\n".join(
         f"Perspective {i+1} ({angles[i]}):\n{b}"
         for i, b in enumerate(branches)
     )
- 
+
     best = await _llm(provider,
         f"You have {num_branches} different expert perspectives on this question: {query}\n\n"
         f"{branch_text}\n\n"
         f"Synthesise these perspectives into one comprehensive, well-rounded answer:"
     )
- 
+
     if depth < 3:
         return best
- 
+
     return await _llm(provider,
         f"Polish and finalise this answer to: {query}\n\n"
         f"Draft answer:\n{best}\n\n"
@@ -241,9 +246,13 @@ async def call_rag_agent(
 ) -> dict[str, Any]:
     if strategy not in _STRATEGIES:
         raise ValueError(f"Unknown strategy '{strategy}'. Choose from: {list(_STRATEGIES.keys())}")
-    
-    kb = KnowledgeBase()
-    kb.load()
+
+    # Use the pre-loaded kb passed by the caller (e.g. OrchestratorEngine).
+    # The original code overwrote this with a fresh KnowledgeBase().load() every
+    # call, reloading the embedding model + FAISS + cross-encoder each time (~30s).
+    if kb is None or not hasattr(kb, 'faiss'):
+        kb = KnowledgeBase()
+        kb.load()
     provider = settings.build_llm_provider()
     logger.warning("-------------------------------------------------------------")
     logger.warning("user_input : '%s'", user_input)
@@ -275,11 +284,12 @@ async def call_rag_agent(
         context = f"Agent context: {agent_registry}\n\n{context}"
  
     answer = await _STRATEGIES[strategy](user_input, context, provider, depth)
-    quality = await _judge(user_input, answer, context, provider)
- 
+    # Internal judge removed — the GoT external judge evaluates every node already.
+    # Calling _judge() here was a redundant second LLM call per RAG invocation.
+
     return {
         "answer": answer,
-        "quality": quality,
+        "quality": "N/A (judged externally by GoT)",
         "strategy": strategy.upper(),
         "source_used": source_titles,
     }

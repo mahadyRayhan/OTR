@@ -47,6 +47,52 @@ try:
 except ImportError:
     pass
 
+# ── Entity stopwords for atomizer ─────────────────────────────────────────────
+# NLTK English stopwords (title-cased) + domain-generic academic/bio terms that
+# match the [A-Z][a-z]{4,} pattern but are not named entities.
+def _build_entity_stopwords() -> frozenset:
+    base: set[str] = set()
+    try:
+        import nltk
+        from nltk.corpus import stopwords as _sw
+        base = {w.title() for w in _sw.words("english")}
+    except Exception:
+        pass
+    # Generic academic/bioinformatics prose words NLTK doesn't cover.
+    # Expanded after observing false positives in telemetry (Local, Source, Solution…).
+    extra = {
+        # discourse / hedge words
+        "Crucially", "Importantly", "Notably", "Particularly", "Essentially",
+        "Specifically", "Generally", "Typically", "Commonly", "Frequently",
+        "Paradoxically", "Conversely", "Similarly", "Consequently",
+        # generic academic nouns
+        "Refinement", "Improvement", "Detection", "Analysis", "Method",
+        "Algorithm", "Approach", "Framework", "Process", "System",
+        "Result", "Output", "Input", "Data", "Value", "Answer", "Paper",
+        "Study", "Figure", "Table", "Section", "Example", "Step",
+        "Performance", "Comparison", "Discussion", "Introduction",
+        "Conclusion", "Abstract", "Source", "Solution", "Problem",
+        "Challenge", "Phase", "Stage", "Version", "Component", "Module",
+        "Structure", "Parameter", "Property", "Feature", "Factor", "Element",
+        "Mechanism", "Strategy", "Technique", "Procedure", "Operation",
+        # graph / math nouns (not tool names)
+        "Communities", "Community", "Network", "Nodes", "Edges",
+        "Graph", "Matrix", "Vector", "Score", "Partition", "Cluster",
+        "Subgraph", "Connectivity", "Modularity", "Resolution",
+        # generic adjectives that open sentences
+        "Local", "Global", "Total", "Single", "Entire", "Original",
+        "Novel", "Previous", "Current", "Recent", "Basic", "Advanced",
+        "Standard", "Simple", "Complex", "Initial", "Final", "Primary",
+        "Secondary", "Internal", "External", "Optimal", "Efficient",
+        # verb-derived nouns / gerunds that start sentences
+        "Moving", "Building", "Ensuring", "Computing", "Running",
+        "Loading", "Saving", "Performing", "Generating", "Creating",
+        "Based", "Using", "Given", "Through", "Across", "Along",
+    }
+    return frozenset(base | extra)
+
+_ENTITY_STOPWORDS: frozenset = _build_entity_stopwords()
+
 class AtomType(Enum):
     CODE_BLOCK = "code"
     NAMED_ENTITY = "entity"
@@ -70,25 +116,30 @@ class DependencyManifest:
 AGENT_MANIFESTS = {
     "code": DependencyManifest(
         agent_type="code",
-        required_atom_types=[AtomType.CODE_BLOCK, AtomType.NAMED_ENTITY],
-        token_budget=600  # Tightened to force CUGCR compression
+        # PROSE_CLAIM added: RAG often returns pure-prose algorithm explanations.
+        # Without PROSE_CLAIM, CUGCR discards the entire context and CODE gets
+        # only a handful of acronym tokens (e.g. "PPI"), making it write blind.
+        required_atom_types=[AtomType.CODE_BLOCK, AtomType.NAMED_ENTITY, AtomType.PROSE_CLAIM],
+        token_budget=600
     ),
     "cloud": DependencyManifest(
         agent_type="cloud",
-        required_atom_types=[AtomType.CODE_BLOCK, AtomType.NAMED_ENTITY],
+        # Same reasoning: cloud tasks need upstream code context (prose description
+        # of what to deploy) not just raw acronyms.
+        required_atom_types=[AtomType.CODE_BLOCK, AtomType.NAMED_ENTITY, AtomType.PROSE_CLAIM],
         token_budget=600
     ),
     "rag": DependencyManifest(
         agent_type="rag",
-        required_atom_types=[AtomType.NAMED_ENTITY],
-        token_budget=300
+        required_atom_types=[AtomType.NAMED_ENTITY, AtomType.PROSE_CLAIM],
+        token_budget=1000
     ),
     "scholar": DependencyManifest(
         agent_type="scholar",
-        required_atom_types=[AtomType.NAMED_ENTITY],
+        required_atom_types=[AtomType.NAMED_ENTITY, AtomType.PROSE_CLAIM],
         # FIX 2: Scholar needs linguistic density to identify researchers.
-        # Old budget was 150 — far too tight. Doubled to 300.
-        token_budget=300
+        # Increased budget significantly to support cognitive profile.
+        token_budget=1500
     )
 }
 
@@ -104,23 +155,50 @@ AGENT_FUSION_WEIGHTS = {
     # so prose passages describing researchers are not discarded.
 }
 
+_PLACEHOLDER_RE = re.compile(
+    r'\[(?:result|explanation|output|summary)\s+of\s+(?:goal|task)\s+\d+\]'
+    r'|'
+    r'\[PLACEHOLDER[^\]]*\]'
+    r'|'
+    r'@@REF@@',
+    re.IGNORECASE,
+)
+
 def atomize_output(raw_output: str) -> list[ContextAtom]:
     """Extracts protected code, biological entities, and prose deterministically."""
     atoms = []
-    
+
     for match in re.finditer(r'```[\s\S]*?```', raw_output):
         atoms.append(ContextAtom(AtomType.CODE_BLOCK, match.group(), is_protected=True))
-    
+
     prose_only = re.sub(r'```[\s\S]*?```', '', raw_output)
-    
-    bio_pattern = r'\b([A-Z]{2,}[0-9]*|[A-Z][a-z]+-\d+)\b'
+    # Strip markdown headers — words in "## Building Well-Connected Communities"
+    # are structural section titles, not named entities. Without this, every
+    # capitalized header word (Building, Source, Refined) becomes a false-positive entity.
+    prose_only = re.sub(r'^#{1,6}\s+.*$', '', prose_only, flags=re.MULTILINE)
+    # Strip bold/italic markers but keep the text (bold terms may be real entities)
+    prose_only = re.sub(r'\*{1,3}', '', prose_only)
+
+    bio_pattern = (
+        r'\b('
+        r'[A-Z]{2,}[0-9]*'              # all-caps acronyms: RNA, STAR, CRISPR
+        r'|[A-Z][a-z]+[A-Z]\w*'         # CamelCase: Scanpy, AnnData, SAMtools
+        r'|[A-Z]{2,}[a-z]+\w*'          # mixed start: DESeq2, HISAT2, BWA
+        r'|[A-Z][a-z]+-\d+'             # hyphen-digit: Leiden-1
+        r'|[A-Z][a-z]{4,}'              # long proper nouns ≥6 chars: Leiden, Louvain, Kallisto
+        r')\b'
+    )
+    seen_entities: set[str] = set()
     for match in re.finditer(bio_pattern, prose_only):
-        atoms.append(ContextAtom(AtomType.NAMED_ENTITY, match.group(), is_protected=True))
-        
+        ent = match.group()
+        if ent not in seen_entities and ent.title() not in _ENTITY_STOPWORDS:
+            seen_entities.add(ent)
+            atoms.append(ContextAtom(AtomType.NAMED_ENTITY, ent, is_protected=True))
+
     for sentence in prose_only.split('. '):
         if len(sentence.strip()) > 15:
             atoms.append(ContextAtom(AtomType.PROSE_CLAIM, sentence.strip() + ".", is_protected=False))
-            
+
     return atoms
 
 def build_rigid_prompt(original_query: str, raw_context: str, token_budget: int = 400) -> str:
@@ -137,7 +215,7 @@ def build_rigid_prompt(original_query: str, raw_context: str, token_budget: int 
     if entities:
         context_block += "### Key Technical Entities\n" + ", ".join(entities[:10]) + "\n\n"
     if prose:
-        context_block += "### Supporting Evidence\n" + "\n".join(f"- {c}" for c in prose[:4]) + "\n\n"
+        context_block += "### Supporting Evidence\n" + "\n".join(f"- {c}" for c in prose[:15]) + "\n\n"
         
     return f"""{context_block}---
 ## Your Task
@@ -223,15 +301,18 @@ class OrchestratorEngine:
         
         print(f"      [CUGCR] Agent={downstream_agent.upper()} | Budget={current_budget} tok | Dense={fw['dense']} Sparse={fw['sparse']}")
 
+        # FIX: Strict upfront type filtering to enforce atomization boundaries
+        valid_atoms = [a for a in atoms if a.type in manifest.required_atom_types]
+
         selected   = []
         used_tokens = 0
         
-        for atom in atoms:
-            if atom.is_protected and atom.type in manifest.required_atom_types:
+        for atom in valid_atoms:
+            if atom.is_protected:
                 selected.append(atom)
                 used_tokens += len(atom.content.split())
         
-        unprotected = [a for a in atoms if a not in selected]
+        unprotected = [a for a in valid_atoms if not a.is_protected]
         if not unprotected or not self.embedder:
             return selected
             
@@ -250,6 +331,9 @@ class OrchestratorEngine:
         
         scored_unprotected = sorted(zip(unprotected, final_scores), key=lambda x: x[1], reverse=True)
         for atom, score in scored_unprotected:
+            # FIX: Introduce an absolute relevance floor to prevent GIGO amplification
+            if score < 0.15:
+                continue
             cost = len(atom.content.split())
             if used_tokens + cost <= current_budget:
                 selected.append(atom)
@@ -321,9 +405,11 @@ class OrchestratorEngine:
                 except Exception:
                     preliminary_crs = 1.0
 
-            if preliminary_crs < 0.30:
+            if preliminary_crs < 0.15:
                 # Upstream context quality is too low — compression would amplify noise.
                 # Inject a short RAW truncation with an explicit warning instead.
+                # Threshold lowered from 0.30 to 0.15: CODE→CLOUD chains have low cosine
+                # similarity (Python script vs Terraform query) but the context is useful.
                 print(f"      [CRS Gate] Preliminary CRS={preliminary_crs:.2f} is below threshold. Skipping CUGCR — injecting warning instead.")
                 warning = (
                     f"⚠️ LOW CONFIDENCE CONTEXT (CRS={preliminary_crs:.2f}): "
@@ -379,6 +465,48 @@ class OrchestratorEngine:
         except Exception as e:
             return f"Score: 0/10 - Judge Failed: {e}"
 
+    def _sanitize_placeholders(self, query: str, parent_nodes: list) -> str:
+        """
+        Last-resort pass: replace every unresolved placeholder with a short
+        excerpt of the actual parent output.  Called after _resolve_dependencies,
+        so it only fires when something slipped through (e.g. the low-CRS
+        warning path that skips CUGCR compression).
+    
+        Parameters
+        ----------
+        query        : the query string that will be sent to _execute_agent
+        parent_nodes : list of GoTNode objects whose .result holds upstream output
+    
+        Returns
+        -------
+        query with all placeholder patterns replaced by real content.
+        """
+        if not _PLACEHOLDER_RE.search(query):
+            return query   # fast exit — nothing to fix
+    
+        # Build a compact summary of all parent outputs (≤300 chars each)
+        excerpts = []
+        for i, node in enumerate(parent_nodes or []):
+            content = (node.result or "").strip()
+            if content:
+                excerpts.append(f"[Upstream result {i + 1}]: {content[:300]}")
+    
+        replacement = (
+            "\n".join(excerpts)
+            if excerpts
+            else "No upstream result available — proceed with general knowledge."
+        )
+    
+        sanitized = _PLACEHOLDER_RE.sub(replacement, query)
+    
+        if sanitized != query:
+            print(
+                f"      [Placeholder Fix] Resolved {len(_PLACEHOLDER_RE.findall(query))} "
+                f"unsubstituted reference(s) before agent call."
+            )
+    
+        return sanitized
+
     async def _execute_pipeline(self, user_input: str, decomposer_name: str, ablation_mode: str = "adaptive", start_time: float = None) -> Dict[str, Any]:
         self.current_run_cugcr_triggered = False 
         
@@ -414,7 +542,12 @@ class OrchestratorEngine:
 
                 if node.op == GoTOp.AGGREGATE:
                     print(f"      [GoT Operator] Safe Processing for AGGREGATE node...")
-                    full_context = "\n\n".join([f"--- Source ---\n{p.result}" for p in parent_nodes if p.result])
+                    real_parents = [p for p in parent_nodes if p.result]
+                    # Single-leaf pipeline (linear RAG→CODE→CLOUD): the leaf's output
+                    # IS the final answer. Skipping the LLM synthesis call saves ~5-10s.
+                    if len(real_parents) == 1:
+                        return real_parents[0].result
+                    full_context = "\n\n".join([f"--- Source ---\n{p.result}" for p in real_parents])
                     agg_prompt = f"""
                     Synthesize a final response to the user's original query using ONLY these outputs:
                     User's Original Query: "{user_input}"
@@ -429,26 +562,44 @@ class OrchestratorEngine:
                 if node.op == GoTOp.REFINE:
                     print(f"      [GoT Operator] Safe Processing for REFINE node with Reflexion...")
                     if ablation_mode == "none":
-                        refine_prompt = f"## Your Task:\n{query}"
-                    else:
-                        previous_answer = parent_nodes[0].result if parent_nodes else "No previous answer recorded."
-                        refine_prompt = f"""
-                        ## ⚠ Retry Attempt Required
-                        ### Your Previous Failed Attempt:
-                        {previous_answer}
-                        ### Judge's Critique:
-                        {node.judge_reasoning}
-                        ### CRITICAL INSTRUCTION:
-                        Write a <reflection> block analyzing your mistake:
-                        <reflection>
-                        - What went wrong in my previous attempt based on the critique:
-                        - How I will correct it:
-                        </reflection>
-                        ## Your Task:
-                        {query}
-                        """
+                        return await self._execute_agent(node.task.agent, query, depth=node.depth)
+                    
+                    previous_answer = parent_nodes[0].result if parent_nodes else "No previous answer recorded."
+                    original_query = parent_nodes[0].task.query if parent_nodes else query
+                    
+                    refine_prompt = f"""
+                    ## ⚠ Retry Attempt Required for Agent: {node.task.agent.upper()}
+                    ### Original Task:
+                    {original_query}
+                    ### Your Previous Failed Attempt:
+                    {previous_answer}
+                    ### Judge's Critique:
+                    {node.judge_reasoning}
+                    
+                    ### CRITICAL INSTRUCTION:
+                    1. Write a <reflection> block analyzing your mistake.
+                    2. Write a <revised_query> that will be sent to the {node.task.agent.upper()} agent to try again.
+                       IMPORTANT: If the original task asked for a specific number of items (like 2 experts, 3 papers), your revised query MUST explicitly include that exact number (e.g., "Find 2 experts in...").
+                    
+                    Format:
+                    <reflection>
+                    ...
+                    </reflection>
+                    <revised_query>
+                    ...
+                    </revised_query>
+                    """
                     res = await asyncio.to_thread(self.llm.generate_content, refine_prompt.strip())
-                    return res.text.strip()
+                    
+                    revised_query = original_query
+                    match = re.search(r'<revised_query>(.*?)</revised_query>', res.text, re.DOTALL)
+                    if match:
+                        revised_query = match.group(1).strip()
+                        
+                    print(f"      [Reflexion] Revised Query: {revised_query[:60]}...")
+                    full_query_to_agent = f"{revised_query}\n\n[Previous Attempt Reflection]:\n{res.text.strip()}"
+                    
+                    return await self._execute_agent(node.task.agent, full_query_to_agent, depth=node.depth)
 
                 if node.parent_ids and node.op not in (GoTOp.AGGREGATE, GoTOp.REFINE):
                     prev_results = {p.node_id: p.result for p in parent_nodes if p.result}
@@ -468,9 +619,15 @@ class OrchestratorEngine:
                         low_confidence=getattr(self, '_last_preliminary_crs', 1.0) < 0.30
                     )
                     query = resolved_query
-                    
+                
+                # ── NEW: safety net — must come AFTER the block above ───────────────────
+                query = self._sanitize_placeholders(query, parent_nodes)
+                #   # ── end new ─────────────────────────────────────────────────────────────
+
+                _exec_t0 = time.monotonic()
                 print(f"      [Executing] Node {node.node_id[:4]} ({node.task.agent.upper()}): {query[:60]}...")
                 result = await self._execute_agent(node.task.agent, query, depth=node.depth)
+                print(f"      [Done]      Node {node.node_id[:4]} ({node.task.agent.upper()}) ← {time.monotonic()-_exec_t0:.1f}s")
                 
                 if node.parent_ids and node.op not in (GoTOp.AGGREGATE, GoTOp.REFINE):
                     comm_tracker.update_result(to_id=node.node_id, output=result, quality=0.0)
@@ -506,6 +663,7 @@ class OrchestratorEngine:
                     "failure_mode": node.failure_mode.value if node.failure_mode else None,
                     "quality_score": node.quality_score,
                     "judge_critique": node.judge_reasoning,
+                    "elapsed_s": node.elapsed_s,
                     "output": node.result
                 })
 
@@ -555,6 +713,8 @@ class OrchestratorEngine:
 
             Available agents: {config.Config.AGENT_REGISTRY_PROMPT}
 
+            IMPORTANT: If the original query asked for a specific number of items (e.g., 2 experts), the revised_query MUST explicitly include that number so the downstream agent knows the quota.
+
             Output ONLY a JSON object:
             {{"failing_agent": "scholar", "revised_query": "specific corrective instruction"}}
             """
@@ -571,6 +731,7 @@ class OrchestratorEngine:
                 final_answer = (await asyncio.to_thread(self.llm.generate_content, synth_prompt)).text.strip()
                 
                 judge_score_raw = await self._gpt_as_judge(user_input, final_answer)
+                print(f"   [Re-Judge] New Judge Score after retry: {judge_score_raw}")
                 match = re.search(r'Score:\s*(\d+)/10', judge_score_raw, re.IGNORECASE)
                 numeric_score = int(match.group(1)) if match else 0
                 
@@ -610,11 +771,18 @@ class OrchestratorEngine:
                         log.utilization_score = 0.0
 
                     # ── CRS ──────────────────────────────────────────────────
-                    if has_context and log.original_query:
-                        log.context_relevance = compute_cus_deterministic(
-                            injected_context  = log.raw_context_injected,
-                            downstream_output = log.original_query,
-                        )
+                    # CRS = cosine similarity between context embedding and
+                    # the downstream query. compute_cus_deterministic is a
+                    # token-overlap scorer designed for long outputs — using it
+                    # on a short query always yields ~0% due to the length
+                    # penalty. Dense embedding similarity is the right metric.
+                    if has_context and log.original_query and self.embedder:
+                        try:
+                            ctx_emb   = self.embedder.encode([log.raw_context_injected[:800]])
+                            qry_emb   = self.embedder.encode([log.original_query])
+                            log.context_relevance = float(cosine_similarity(qry_emb, ctx_emb)[0][0])
+                        except Exception:
+                            log.context_relevance = 0.0
                     else:
                         log.context_relevance = 0.0
 
