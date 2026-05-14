@@ -242,8 +242,9 @@ async def call_rag_agent(
     if strategy not in _STRATEGIES:
         raise ValueError(f"Unknown strategy '{strategy}'. Choose from: {list(_STRATEGIES.keys())}")
     
-    kb = KnowledgeBase()
-    kb.load()
+    # kb = KnowledgeBase()
+    # kb.load()
+    logger.warning(">>> call_rag_agent using kb id: %s | ntotal: %s", id(kb), kb.faiss._index.ntotal if kb.faiss._index else "NO INDEX")
     provider = settings.build_llm_provider()
     logger.warning("-------------------------------------------------------------")
     logger.warning("user_input : '%s'", user_input)

@@ -61,7 +61,14 @@ QUERIES = [
 
     # RNA-seq alignment (covers coreference_explanation gap)
     "splice-aware RNA-seq alignment STAR HISAT2 algorithm",         
-    "RNA-seq splice junction alignment intron splicing detection",    
+    "RNA-seq splice junction alignment intron splicing detection",   
+
+    # Cloud / HPC for bioinformatics
+    "memory requirements single-cell RNA-seq clustering million cells",
+    "cloud computing bioinformatics HPC AWS single-cell analysis",
+    "distributed computing Scanpy Seurat large scale single-cell",
+    "memory-optimized instances bioinformatics genomics cloud",
+    "scalable single-cell analysis computational resources benchmark", 
 ]
 
 S2_FIELDS = "title,authors,year,venue,abstract,externalIds,openAccessPdf"

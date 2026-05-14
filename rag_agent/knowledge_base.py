@@ -505,6 +505,7 @@ class SemanticScholarFetcher:
         async with aiohttp.ClientSession(headers=headers) as session:
             try:
                 async with session.get(f"{self.BASE}/paper/search", params=params, timeout=aiohttp.ClientTimeout(total=12)) as r:
+                    print(f"  [S2 DEBUG] status={r.status} query={query[:50]}")
                     data = await r.json(content_type=None)
                 papers = []
                 for item in data.get("data", []):
@@ -659,6 +660,9 @@ class KnowledgeBase:
 
         # 4. Cross-encoder re-ranking
         ranked = self.reranker.rerank(biased_query, all_papers)
+
+        for p in ranked[:5]:
+            print(f"  DEBUG score={p.score:.4f} source={p.source} | {p.title[:50]}")
 
         # logger.warning("p.score :'%s'", p)
         # logger.warning("settings.confidence_threshold :'%s'", settings.confidence_threshold)

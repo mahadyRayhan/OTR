@@ -3,11 +3,25 @@ rag_config.py — Centralised configuration via Pydantic Settings.
 
 All values are loaded from environment variables (or the .env file).
 Import the singleton `settings` anywhere in the project.
+
+Fix: FAISS / BERTopic paths are now resolved relative to this file's own
+directory (OTR/rag_agent/) so they are correct regardless of the working
+directory the orchestrator is launched from.
 """
 
+import os as _os
 from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Absolute path to the rag_agent/ package directory.
+# __file__ is always OTR/rag_agent/rag_config.py, so dirname gives OTR/rag_agent/
+_RAG_DIR = _os.path.dirname(_os.path.abspath(__file__))
+
+
+def _rag_path(*parts: str) -> str:
+    """Return an absolute path anchored at the rag_agent/ directory."""
+    return _os.path.join(_RAG_DIR, *parts)
 
 
 class Settings(BaseSettings):
@@ -77,11 +91,22 @@ class Settings(BaseSettings):
     embedding_device: str = Field("cpu", description="torch device: cpu | cuda | mps")
 
     # ── FAISS Vector Store ───────────────────────────────────────────────────
-    faiss_index_path: str = Field("./data/faiss_index", description="Path to persisted FAISS index")
-    faiss_metadata_path: str = Field("./data/faiss_metadata.pkl", description="Pickled metadata store")
+    # Paths are anchored to rag_agent/ so they resolve correctly whether the
+    # process is launched from OTR/rag_agent/ or OTR/scripts/ or anywhere else.
+    faiss_index_path: str = Field(
+        default_factory=lambda: _rag_path("data", "faiss_index"),
+        description="Absolute path to persisted FAISS index",
+    )
+    faiss_metadata_path: str = Field(
+        default_factory=lambda: _rag_path("data", "faiss_metadata.pkl"),
+        description="Absolute path to pickled metadata store",
+    )
 
     # ── Topic Modeling ───────────────────────────────────────────────────────
-    bertopic_model_path: str = Field("./models/bertopic_model", description="Path to saved BERTopic model")
+    bertopic_model_path: str = Field(
+        default_factory=lambda: _rag_path("models", "bertopic_model"),
+        description="Absolute path to saved BERTopic model",
+    )
     topic_min_cluster_size: int = Field(10, description="HDBSCAN minimum cluster size")
     topic_n_gram_range: tuple[int, int] = Field((1, 3), description="N-gram range for c-TF-IDF")
 
@@ -123,7 +148,8 @@ class Settings(BaseSettings):
             return get_provider("claude", api_key=self.anthropic_api_key, model=model_override or self.anthropic_model)
         if name in ("openai", "gpt"):
             kw = dict(api_key=self.openai_api_key, model=model_override or self.openai_model)
-            if self.openai_base_url: kw["base_url"] = self.openai_base_url
+            if self.openai_base_url:
+                kw["base_url"] = self.openai_base_url
             return get_provider("openai", **kw)
         if name in ("gemini", "google"):
             return get_provider("gemini", api_key=self.gemini_api_key, model=model_override or self.gemini_model)
