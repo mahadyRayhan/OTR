@@ -1060,7 +1060,7 @@ class AdaptiveGoTOrchestrator:
     async def run(
         self,
         tasks: List[TaskNode],
-        user_profile: UserProfile,
+        user_profile: Optional[UserProfile],
         model: Optional[genai.GenerativeModel] = None,
         *,
         agent_executor: Optional[Callable] = None,
@@ -1078,7 +1078,9 @@ class AdaptiveGoTOrchestrator:
         Returns:
             The final synthesised answer string.
         """
-        profile = user_profile.profile
+        profile = user_profile.profile if user_profile is not None else {
+            Dim.CONCEPTUAL: 33.3, Dim.PROCEDURAL: 33.3, Dim.ANALYTICAL: 33.4
+        }
 
         self._dag = AdaptiveGoTDAG(
             quality_threshold=self.quality_threshold,

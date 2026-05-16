@@ -662,11 +662,17 @@ class KnowledgeBase:
 
         # logger.warning("p.score :'%s'", p)
         # logger.warning("settings.confidence_threshold :'%s'", settings.confidence_threshold)
-        # 5. Filter by confidence threshold
+        # 5. Filter by confidence threshold.
+        # Fallback: if the threshold wipes everything (e.g. cross-encoder scores
+        # are systematically low for academic text), return the top-K ranked papers
+        # anyway — the reranker already sorted them best-first.
         filtered = [p for p in ranked if p.score >= settings.confidence_threshold]
-        # logger.warning("------------------------------------------------------------")
-        # logger.warning("filtered : Paper found '%s'", filtered)
-        # logger.warning("------------------------------------------------------------")
+        if not filtered and ranked:
+            logger.warning(
+                "All %d papers scored below threshold %.2f — returning top-%d anyway.",
+                len(ranked), settings.confidence_threshold, k,
+            )
+            return ranked[:k]
         return filtered[:k]
 
     def get_tools_for_topic(self, topic_name: str) -> list[str]:

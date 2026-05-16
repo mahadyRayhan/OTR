@@ -287,10 +287,14 @@ async def call_rag_agent(
     # Internal judge removed — the GoT external judge evaluates every node already.
     # Calling _judge() here was a redundant second LLM call per RAG invocation.
 
+    if not papers and len(answer.strip()) < 80:
+        answer = f"[STRUCTURAL_FAIL: no papers retrieved and answer is too short]\n{answer}"
+
     return {
         "answer": answer,
         "quality": "N/A (judged externally by GoT)",
         "strategy": strategy.upper(),
         "source_used": source_titles,
+        "paper_count": len(papers),
     }
  

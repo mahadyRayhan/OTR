@@ -1,0 +1,133 @@
+FAILURE ANALYSIS REPORT — Adaptive Pipeline
+============================================================
+Total adaptive runs: 35
+Mean score: 5.11/10
+
+── Adversarial / Impossible (5 queries) ──
+   Mean score : 2.4  (min=2, max=3)
+   Mean retries: 1.4
+   Queries:
+     [ 2] Find 2 experts on Quantum Computing in Genomics. Write a Qiskit Python script to run 
+     [ 2] Take the outputs from the top 3 researchers in RNA-seq alignment and feed their recom
+     [ 2] Design an AWS architecture for hosting a multiplayer video game backend using DESeq2.
+     [ 3] Write a Python script that both aligns and simultaneously un-aligns RNA-seq reads to 
+     [ 3] Write a script to perform differential expression with DESeq2, but only if DESeq2 can
+
+   FIX:
+Root cause: The query is either contradictory, nonsensical, or a category mismatch
+  (e.g. "game backend using DESeq2", "align and un-align simultaneously").
+  The system tries to comply rather than reject, wasting cycles on impossible outputs.
+
+  Fix — Add a Query Intent Validator before decomposition:
+    1. In decompose_only(), before calling decomposer.decompose(), run a lightweight
+       LLM call asking: "Is this question coherent and answerable by a bioinformatics
+       AI? Reply YES or NO with one-line reason."
+    2. If NO → return a structured rejection answer immediately with score=0 flagged.
+    3. Cost: one tiny LLM call per query. Saves 3-5 full pipeline runs per batch.
+    4. Bonus: The adversarial GROUP 5 queries are known test cases — you could also
+       hard-code a keyword blacklist (["video game", "un-align", "secondary structure of DE genes"])
+       as a free O(1) first pass.
+
+── Knowledge Base Gap (7 queries) ──
+   Mean score : 7.6  (min=6, max=10)
+   Mean retries: 0.4
+   Queries:
+     [ 6] Explain how to process a whole-genome sequencing dataset through GATK variant calling
+     [ 7] Find 3 experts on Leiden community detection in single-cell genomics. Use their exact
+     [ 7] Explain how the MAGIC imputation algorithm reconstructs gene expression for single-ce
+     [ 7] Write a Terraform script to deploy an AWS r6i.4xlarge instance for STAR alignment, in
+     [ 8] Compare the pros and cons of using Salmon versus Kallisto for RNA-seq quantification.
+     [ 8] I need to perform single-cell trajectory inference using the Monocle3 algorithm. Writ
+     [10] Write a simple Python script using pysam to open a BAM file, iterate over reads, and 
+
+   FIX:
+Root cause: Topics not represented in the FAISS knowledge base (Monocle3, GATK,
+  Kallisto, Quantum Genomics). RAG returns 0-1 papers → agent answers from LLM weights
+  alone → high hallucination risk, low grounding score.
+
+  Fix — Two-tier RAG with graceful fallback:
+    1. When paper_count < 2 after FAISS search, auto-trigger the PubMed/Semantic Scholar
+       live API path (already exists in KnowledgeBase). The live path is slower but not
+       gated by what's in the local index.
+    2. In rag_agent/agent.py the fallback to general LLM knowledge is currently commented
+       out. Un-comment it but add a clear provenance marker:
+         "⚠️ FALLBACK: No papers in local KB. Answer from LLM general knowledge — verify independently."
+    3. Long-term: expand the FAISS index with GATK, Kallisto, Monocle3, MAGIC papers.
+
+── Scholar Chain Fragility (4 queries) ──
+   Mean score : 4.0  (min=3, max=6)
+   Mean retries: 1.2
+   Queries:
+     [ 3] Compare the Leiden and Louvain community detection algorithms in deep mathematical de
+     [ 3] Identify 3 top researchers working on splice-aware RNA-seq alignment algorithms. Summ
+     [ 4] Search for 2 experts on multimodal single-cell data integration. Based on their resea
+     [ 6] Find 4 experts who have published papers on 'STAR RNA-seq splice junction alignment'.
+
+   FIX:
+Root cause: Scholar nodes spawn 4-7 separate API lookups to find researchers.
+  If a researcher name is wrong or not found, the downstream code/cloud node receives
+  an empty or fictional name and builds on a broken foundation. High retry count
+  reflects GoT trying to fix downstream failures caused by the bad upstream name.
+
+  Fix — Scholar output validation + chain guard:
+    1. scholar_agent/agent.py already prepends [STRUCTURAL_FAIL] when experts_list is empty.
+       Extend this: also flag when any returned expert name looks synthetic
+       (no real publication list, name not found in Semantic Scholar).
+    2. Add a scholar_agent result validator in _execute_agent() that checks:
+       - Expert names are non-empty strings
+       - At least one paper URL or DOI is present in the output
+       If validation fails, mark the node as STRUCTURAL_FAIL before the downstream
+       code node reads from it.
+    3. In the decomposer, for scholar→code chains, add an intermediate RAG node that
+       verifies the researcher's claimed methods exist in the literature before the
+       code node uses them as ground truth.
+
+── Scope Overflow (6 queries) ──
+   Mean score : 2.7  (min=2, max=4)
+   Mean retries: 1.2
+   Queries:
+     [ 2] Find 4 researchers who have published on DESeq2 statistical modelling and dispersion 
+     [ 2] Retrieve the full SAM/BAM format specification including ALL mandatory fields, every 
+     [ 2] Retrieve ALL algorithmic details from papers on the STAR aligner including suffix arr
+     [ 3] Retrieve comprehensive documentation on BOTH the Leiden community detection algorithm
+     [ 3] Retrieve all available papers on CRISPR base editing covering both cytosine base edit
+     [ 4] Explain the full SAM file format specification, including all mandatory fields, every
+
+   FIX:
+Root cause: "Retrieve ALL / BOTH / comprehensive" queries cause the GoT DAG
+  to spawn 10-16 nodes, each covering a narrow slice. The AGGREGATE node then receives
+  12 partial fragments and cannot synthesize a coherent whole — especially for code,
+  where 5 separate code snippets need to form one library.
+
+  Fix — Three complementary changes:
+    1. Node budget cap: In AdaptiveGoTOrchestrator, add max_initial_nodes=6.
+       Force the decomposer prompt to say: "Split into AT MOST 5 subtasks regardless
+       of how many parts the question has. Merge related parts."
+    2. Code consolidation node: When multiple code nodes exist in the DAG, add a
+       dedicated CONSOLIDATE operator (already have AGGREGATE) that explicitly tells
+       the LLM: "Merge these code snippets into one unified module with no duplicate
+       imports and a single entry point."
+    3. Query pre-simplification: Detect scope-overload language before decomposition
+       ("retrieve ALL", "minimum N functions") and rewrite the query to:
+       "Provide a representative and complete answer — you do not need to be exhaustive." 
+
+── Success (13 queries) ──
+   Mean score : 6.3  (min=2, max=9)
+   Mean retries: 0.5
+   Queries:
+     [ 2] retrieve the exact two-pass alignment parameters from the STAR paper and write a Pyth
+     [ 4] Detail the STAR aligner's genome index construction using suffix arrays and its two-p
+     [ 4] Describe the Weighted Nearest Neighbor (WNN) multimodal integration method from the S
+     [ 4] Explain the DESeq2 dispersion estimation pipeline in detail: Cox-Reid adjusted profil
+     [ 6] Find 2 human experts who have published papers on programmable CRISPR base editing. E
+     [ 7] Do the thing with the single-cell data where it finds the communities using that grap
+     [ 7] Explain how the SAM and BAM file formats store sequencing alignment data, including C
+     [ 7] Describe the biochemical mechanisms of both cytosine base editing (C·G to T·A via dea
+     [ 8] Explain the Leiden community detection algorithm and how it guarantees well-connected
+     [ 8] Describe the splice-aware alignment algorithm used by STAR for RNA-seq, including its
+     [ 8] Explain the statistical model behind DESeq2 for differential expression analysis, inc
+     [ 8] Find 1 expert on differential expression analysis using count-based RNA-seq models. W
+     [ 9] What negative binomial distribution parameters does DESeq2 use to model RNA-seq read 
+
+   FIX:
+No fix available.

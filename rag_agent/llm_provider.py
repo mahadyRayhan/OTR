@@ -247,11 +247,12 @@ class OpenAIProvider(LLMProvider):
 
 class GeminiProvider(LLMProvider):
     provider_name = "gemini"
+    # default_model = 'gemini-flash-latest'
     default_model = "gemini-2.0-flash-lite"
 
     MODEL_ALIASES: dict[str, str] = {
         "flash":      "gemini-2.0-flash-lite",
-        "flash-lite": "gemini-2.0-flash-lite",
+        "flash-lite": "gemini-2.5-flash-lite",
         "pro":        "gemini-1.5-pro",
     }
 

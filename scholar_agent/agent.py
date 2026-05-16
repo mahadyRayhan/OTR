@@ -4,12 +4,20 @@ import asyncio
 import time
 import math
 import re
+import sqlite3
+import ssl
 import urllib.request
 import urllib.parse
 import google.generativeai as genai
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, List, Dict, Any
+
+# macOS Python.org builds lack system CA bundle — disable cert check for S2 API
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode    = ssl.CERT_NONE
 
 # ---------------------------------------------------------
 # MODELS
@@ -36,6 +44,7 @@ class Author:
     name: str
     paper_count: int
     citation_count: int
+    affiliations: Optional[List[str]] = None
 
 @dataclass
 class ExpertResult:
@@ -72,21 +81,32 @@ class RealSemanticScholarProvider:
     def __init__(self):
         self.limiter = TokenBucketRateLimiter(rate_per_second=1.0, capacity=2)
 
-    async def _fetch(self, url: str) -> dict:
-        await self.limiter.acquire()
+    async def _fetch(self, url: str, max_retries: int = 3) -> dict:
         api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
-        req = urllib.request.Request(url)
-        if api_key:
-            req.add_header("x-api-key", api_key)
 
-        try:
-            def do_request():
-                with urllib.request.urlopen(req) as response:
-                    return json.loads(response.read().decode('utf-8'))
-            return await asyncio.to_thread(do_request)
-        except Exception as e:
-            print(f"[API Warning] Failed to fetch data: {e}")
-            return {}
+        for attempt in range(max_retries):
+            await self.limiter.acquire()
+            req = urllib.request.Request(url)
+            if api_key:
+                req.add_header("x-api-key", api_key)
+
+            try:
+                def do_request():
+                    with urllib.request.urlopen(req, context=_SSL_CTX, timeout=20) as response:
+                        return json.loads(response.read().decode('utf-8'))
+                return await asyncio.to_thread(do_request)
+            except urllib.error.HTTPError as e:
+                if e.code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                    wait = 2 ** attempt  # 1s, 2s, 4s
+                    print(f"[API Warning] HTTP {e.code} — retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(wait)
+                else:
+                    print(f"[API Warning] Failed to fetch data: {e}")
+                    return {}
+            except Exception as e:
+                print(f"[API Warning] Failed to fetch data: {e}")
+                return {}
+        return {}
 
     async def search_papers(self, query: str, limit: int = 30) -> List[Paper]:
         safe_query = urllib.parse.quote(query)
@@ -134,7 +154,7 @@ def get_llm_model():
     if not api_key or api_key == "your_google_api_key_here":
         return None
     genai.configure(api_key=api_key)
-    # return genai.GenerativeModel('gemini-2.5-flash')
+    # return genai.GenerativeModel('gemini-flash-latest')
     return genai.GenerativeModel('gemini-3.1-flash-lite-preview')
 
 async def extract_search_topic(query: str, model) -> str:
@@ -270,11 +290,189 @@ RetryQuery: [a better search string if score < 7 AND found < requested, otherwis
         }
 
 # ---------------------------------------------------------
+# LOCAL CACHE PROVIDER (SQLite + ChromaDB fallback)
+# ---------------------------------------------------------
+_AGENT_DIR = Path(__file__).resolve().parent
+
+class ScholarCacheProvider:
+    """Queries the pre-built local SQLite + ChromaDB cache as a fallback."""
+
+    def __init__(self):
+        self.db_path    = _AGENT_DIR / "scholar_cache.db"
+        self.chroma_path = _AGENT_DIR / "scholar_chroma_db"
+        self._chroma_col = None
+
+    def _get_chroma_col(self):
+        if self._chroma_col is not None:
+            return self._chroma_col
+        try:
+            import chromadb
+            from chromadb.utils import embedding_functions
+            client = chromadb.PersistentClient(path=str(self.chroma_path))
+            ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name="all-MiniLM-L6-v2"
+            )
+            self._chroma_col = client.get_collection(
+                "scholar_cache_vault", embedding_function=ef
+            )
+        except Exception as exc:
+            print(f"   [Cache] ChromaDB unavailable: {exc}")
+            self._chroma_col = None
+        return self._chroma_col
+
+    def _papers_for_author(self, con: sqlite3.Connection, author_id: str) -> List[Paper]:
+        rows = con.execute(
+            """SELECT p.paper_id, p.title, p.abstract, p.year,
+                      p.citation_count, p.fields
+               FROM author_papers ap
+               JOIN papers p ON p.paper_id = ap.paper_id
+               WHERE ap.author_id = ?
+               ORDER BY p.citation_count DESC
+               LIMIT 5""",
+            (author_id,),
+        ).fetchall()
+        papers = []
+        for r in rows:
+            fos = json.loads(r[5] or "[]") if r[5] else []
+            papers.append(Paper(
+                id=r[0], title=r[1] or "", abstract=r[2] or "",
+                year=r[3] or 0, citation_count=r[4] or 0,
+                authors=[], publication_types=[], fields_of_study=fos,
+            ))
+        return papers
+
+    def query_sqlite(self, topic: str, limit: int, exclude_ids: set) -> List[ExpertResult]:
+        if not self.db_path.exists():
+            return []
+        try:
+            con = sqlite3.connect(self.db_path)
+            keywords = [w for w in topic.lower().split() if len(w) > 4][:5]
+            if not keywords:
+                con.close()
+                return []
+
+            # Match authors whose cached topics contain any of the keywords
+            placeholders = " OR ".join(["LOWER(ta.topic) LIKE ?" for _ in keywords])
+            params = [f"%{kw}%" for kw in keywords] + [limit * 4]
+            rows = con.execute(
+                f"""SELECT a.author_id, a.name, a.citation_count, a.paper_count,
+                           SUM(ta.relevance) AS total_rel
+                    FROM topic_authors ta
+                    JOIN authors a ON a.author_id = ta.author_id
+                    WHERE ({placeholders})
+                      AND a.citation_count > 0
+                    GROUP BY a.author_id
+                    ORDER BY total_rel DESC, a.citation_count DESC
+                    LIMIT ?""",
+                params,
+            ).fetchall()
+
+            results: List[ExpertResult] = []
+            for aid, name, cites, paper_count, relevance in rows:
+                if aid in exclude_ids or len(results) >= limit:
+                    continue
+                papers = self._papers_for_author(con, aid)
+                kws = list({f for p in papers for f in p.fields_of_study})[:4]
+                if not kws:
+                    # Fall back to associated topic strings for meaningful expertise labels
+                    topic_rows = con.execute(
+                        """SELECT ta.topic FROM topic_authors ta
+                           WHERE ta.author_id = ?
+                           ORDER BY ta.relevance DESC LIMIT 4""",
+                        (aid,),
+                    ).fetchall()
+                    kws = [r[0] for r in topic_rows] or ["bioinformatics"]
+                score = min(math.log1p(relevance or 0) / 20.0, 1.0)
+                results.append(ExpertResult(
+                    author=Author(
+                        id=aid, name=name,
+                        paper_count=paper_count or 0,
+                        citation_count=cites or 0,
+                    ),
+                    relevance_score=round(score, 4),
+                    matched_papers=papers,
+                    expertise_areas=kws,
+                ))
+            con.close()
+            return results
+        except Exception as exc:
+            print(f"   [Cache] SQLite query failed: {exc}")
+            return []
+
+    def query_chroma(self, topic: str, limit: int, exclude_ids: set) -> List[ExpertResult]:
+        col = self._get_chroma_col()
+        if col is None:
+            return []
+        try:
+            n_ask = min(limit * 3, col.count())
+            if n_ask == 0:
+                return []
+            result = col.query(query_texts=[topic], n_results=n_ask)
+            metas = result.get("metadatas", [[]])[0]
+            results: List[ExpertResult] = []
+            for meta in metas:
+                if len(results) >= limit:
+                    break
+                aid = meta.get("author_id", "")
+                if aid in exclude_ids:
+                    continue
+                name        = meta.get("name", "Unknown")
+                cites       = meta.get("citation_count", 0)
+                paper_count = meta.get("paper_count", 0)
+                affil_str   = meta.get("affiliations", "") or ""
+                topic_str   = meta.get("topics", "") or ""
+                kws = [t.strip() for t in topic_str.split(";") if t.strip()][:4]
+                if not kws:
+                    kws = ["bioinformatics"]
+                results.append(ExpertResult(
+                    author=Author(
+                        id=aid, name=name,
+                        paper_count=paper_count,
+                        citation_count=cites,
+                        affiliations=[affil_str] if affil_str else None,
+                    ),
+                    relevance_score=0.5,
+                    matched_papers=[],
+                    expertise_areas=kws,
+                ))
+
+            # Enrich with paper data from SQLite cache
+            if results and self.db_path.exists():
+                try:
+                    con = sqlite3.connect(self.db_path)
+                    for r in results:
+                        papers = self._papers_for_author(con, r.author.id)
+                        if papers:
+                            r.matched_papers = papers
+                    con.close()
+                except Exception:
+                    pass
+            return results
+        except Exception as exc:
+            print(f"   [Cache] ChromaDB query failed: {exc}")
+            return []
+
+    def query(self, topic: str, limit: int, exclude_ids: set) -> List[ExpertResult]:
+        if limit <= 0:
+            return []
+        # ChromaDB first — semantic similarity gives better topical relevance
+        results = self.query_chroma(topic, limit, exclude_ids)
+        remaining = limit - len(results)
+        if remaining > 0:
+            filled_ids = exclude_ids | {r.author.id for r in results}
+            sql_results = self.query_sqlite(topic, remaining, filled_ids)
+            results.extend(sql_results)
+        return results
+
+
+# ---------------------------------------------------------
 # SCHOLAR AGENT CORE
 # ---------------------------------------------------------
 class ScholarAgent:
     def __init__(self):
-        self.provider = RealSemanticScholarProvider()
+        self.provider    = RealSemanticScholarProvider()
+        self._cache      = ScholarCacheProvider()
+        self.cache_used  = False  # set True when cache fills shortfall
 
     # FIX 4: smarter fallback query sequence instead of just word-dropping
     def _build_query_sequence(self, topic: str) -> List[str]:
@@ -304,17 +502,42 @@ class ScholarAgent:
         diverse_results: List[ExpertResult] = []
         seen_top_paper_ids: set = set()
         seen_author_ids: set = set()
+        self.cache_used = False
 
+        # ── STEP 1: Query local cache first ───────────────────────────────────
+        cache_results = self._cache.query(topic, limit, set())
+        if cache_results:
+            print(f"   [Cache] Found {len(cache_results)}/{limit} from local DB.")
+            for r in cache_results:
+                aid = r.author.id if r.author.id != "no-id" else r.author.name.lower().strip()
+                if aid not in seen_author_ids:
+                    diverse_results.append(r)
+                    seen_author_ids.add(aid)
+                    for p in r.matched_papers:
+                        seen_top_paper_ids.add(p.id)
+            self.cache_used = True
+
+        if len(diverse_results) >= limit:
+            return diverse_results
+
+        # ── STEP 2: Cache insufficient — call API for the remaining slots ─────
+        # Start from the SECOND (broadened) query: the cache already covers the
+        # exact-topic match, so repeating pass 1 against the live API would just
+        # duplicate what the cache already provided.
         query_sequence = self._build_query_sequence(topic)
+        api_sequence = query_sequence[1:] if len(query_sequence) > 1 else query_sequence
 
-        # FIX 2: attempts increments only when we actually need to retry (inside the
-        # shortfall branch), so we don't waste a retry slot on a successful pass.
-        for attempt, current_topic in enumerate(query_sequence):
+        print(
+            f"   [Cache] {len(diverse_results)}/{limit} found. "
+            f"Falling back to API (starting at broadened query)..."
+        )
+
+        for attempt, current_topic in enumerate(api_sequence):
             if len(diverse_results) >= limit:
                 break
 
-            print(f"   [ScholarAgent] Pass {attempt + 1}/{len(query_sequence)}: '{current_topic}'")
-            papers = await self.provider.search_papers(current_topic, limit=100)
+            print(f"   [ScholarAgent] API Pass {attempt + 1}/{len(api_sequence)}: '{current_topic}'")
+            papers = await self.provider.search_papers(current_topic, limit=150)
 
             # Drop News and Editorials
             valid_papers = [
@@ -466,11 +689,23 @@ async def call_scholar_agent(
             return "No experts found. The API might not have data on this."
         out = f"Found {len(experts)} top distinct expert(s) in this field:"
         for i, exp in enumerate(experts):
+            top_papers = exp.matched_papers[:3]
+            papers_str = ""
+            for p in top_papers:
+                papers_str += (
+                    f"\n       • [{p.year}] \"{p.title}\"  ({p.citation_count:,} citations)"
+                )
+            affil = ""
+            if exp.author.affiliations:
+                affil = f"\n     Institution     : {exp.author.affiliations[0]}"
             out += (
-                f"\n\n   {label} {i + 1}: {exp.author.name} "
-                f"(Score: {exp.relevance_score}, Citations: {exp.author.citation_count})"
-                f"\n     Keywords: {exp.expertise_areas}"
-                f"\n     Top Paper: '{exp.matched_papers[0].title}'"
+                f"\n\n   {label} {i + 1}: {exp.author.name}"
+                f"{affil}"
+                f"\n     Relevance Score : {exp.relevance_score}"
+                f"\n     Total Citations : {exp.author.citation_count:,}"
+                f"\n     Matched Papers  : {exp.author.paper_count} on this topic"
+                f"\n     Research Areas  : {', '.join(exp.expertise_areas[:3])}"
+                f"\n     Top Papers      : {papers_str if papers_str else ' (not available)'}"
             )
         return out
 
@@ -480,9 +715,11 @@ async def call_scholar_agent(
         experts_list, label="Candidate" if is_collaboration else "Expert"
     )
 
-    # FIX 3 & 4: call the active judge, pass count context
+    # Judge evaluates against the cleaned search topic, not the raw orchestrator
+    # sub-task which may contain algorithm/extraction instructions that scholar
+    # was never meant to fulfil.
     judge_result = await scholar_llm_judge(
-        query=user_input,
+        query=clean_topic,
         agent_output=base_output,
         model=llm,
         requested_count=limit,
@@ -496,11 +733,11 @@ async def call_scholar_agent(
     # STEP 3: Active self-correction
     # If the judge score is low AND it suggests a better query,
     # do one more internal search with that query before giving up.
+    # Retry whenever quality is low — not only on shortfall.
     # -------------------------------------------------------
     if (
         judge_result["score"] < JUDGE_SCORE_THRESHOLD
         and judge_result["retry_query"]
-        and len(experts_list) < limit
     ):
         retry_topic = judge_result["retry_query"]
         print(
@@ -517,7 +754,7 @@ async def call_scholar_agent(
             )
             # Re-evaluate after correction
             judge_result = await scholar_llm_judge(
-                query=user_input,
+                query=clean_topic,
                 agent_output=base_output,
                 model=llm,
                 requested_count=limit,
@@ -541,14 +778,21 @@ async def call_scholar_agent(
             f"Orchestrator should retry with limit={limit}."
         )
 
+    cache_line = "\n   [CACHE-SUPPLEMENTED: results from local researcher cache]" \
+        if agent_instance.cache_used else ""
+
     judge_summary = (
         f"Score: {judge_result['score']}/10 — {judge_result['reason']}"
     )
 
-    return (
+    result = (
         f"[Scholar Agent - {mode_label}]\n"
         f"   {base_output}"
-        f"{shortfall_line}\n"
+        f"{shortfall_line}"
+        f"{cache_line}\n"
         f"   -----------------------------------\n"
         f"   ⚖️  LLM Judge: {judge_summary}"
     )
+    if not experts_list:
+        result = f"[STRUCTURAL_FAIL: 0 experts retrieved — API returned no results for this topic]\n{result}"
+    return result

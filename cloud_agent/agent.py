@@ -3,7 +3,7 @@ import asyncio
 import chromadb
 import google.generativeai as genai
 
-# GEMINI_MODEL = "gemini-2.5-flash"
+# GEMINI_MODEL = "gemini-flash-latest"
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
 DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
 
@@ -105,6 +105,9 @@ async def call_cloud_agent(user_input: str, strategy: str = "cot", depth: int = 
             f"Infrastructure files saved locally to: cloud_agent/generated_infrastructure/{filename}\n\n"
             f"{output_text}\n"
         )
+        _infra_kw = ("resource", "aws_", "provider", "module", "terraform", "aws", "ec2", "s3")
+        if "```" not in output_text and not any(kw in output_text.lower() for kw in _infra_kw):
+            final_output = f"[STRUCTURAL_FAIL: no infrastructure definition detected]\n{final_output}"
         return final_output
 
     except Exception as e:

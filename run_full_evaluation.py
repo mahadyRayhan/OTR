@@ -40,9 +40,9 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 ENGINE_TELEMETRY_FILE = Path("experiment_telemetry.json")
 
 # ── Rate-limit helpers ───────────────────────────────────────────────────────
-INTER_RUN_SLEEP   = 30   # seconds between normal runs
-ERROR_SLEEP       = 90   # seconds after API error
-LONG_SLEEP        = 60   # seconds between protocol blocks
+INTER_RUN_SLEEP   = 1   # seconds between normal runs
+ERROR_SLEEP       = 3   # seconds after API error
+LONG_SLEEP        = 2   # seconds between protocol blocks
 
 # ── Query banks ─────────────────────────────────────────────────────────────
 

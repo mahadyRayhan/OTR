@@ -615,6 +615,25 @@ class DynamicProfiler:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# STATELESS SINGLE-QUERY CLASSIFICATION
+# ──────────────────────────────────────────────────────────────────────────────
+
+def classify_query(query: str) -> Dict[str, float]:
+    """
+    Classify a single query's intent without touching the global profile state.
+    Returns {dim.value: percentage} summing to 100, using the deterministic path.
+    Use this in benchmark mode or anywhere you want a clean per-query signal.
+    """
+    return {d.value: v for d, v in _classify_deterministic(query).items()}
+
+
+def dominant_dim(query: str) -> str:
+    """Return the single dominant dimension name ('conceptual'|'procedural'|'analytical')."""
+    scores = _classify_deterministic(query)
+    return max(scores, key=scores.get).value
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # GLOBAL SINGLETON
 # ──────────────────────────────────────────────────────────────────────────────
 

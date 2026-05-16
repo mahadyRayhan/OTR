@@ -319,12 +319,15 @@ QDMR_PATTERN_RULES: List[Tuple[re.Pattern, QDMROp]] = [
     ), QDMROp.PROJECT),
 
     # ── Expert / paper finding ──────────────────────────────────────────────
+    # Trailing \b intentionally removed — plural forms ("experts", "researchers",
+    # "authors") end with 's' which breaks the boundary against the next char.
+    # Leading \b is sufficient to prevent mid-word false matches.
     (re.compile(
-        r"\b(expert|researcher|citation|"
-        r"author|journal|who works? on|find.*who|recent study|"
-        r"literature review|bibliograph)\b"
+        r"\b(experts?|researchers?|citations?|"
+        r"authors?|journal|who works? on|find.*who|recent stud(?:y|ies)|"
+        r"literature review|bibliograph)"
         r"|"
-        r"\b(?:find|search\s+for|look\s+for)\b.{0,40}?\b(?:paper|publication)\b",
+        r"\b(?:find|search\s+for|look\s+for)\b.{0,40}?\b(?:papers?|publications?)\b",
         re.IGNORECASE,
     ), QDMROp.EXPERT),
 
@@ -949,6 +952,9 @@ STRICT RULES:
    and write a placeholder like "[result of goal M]" in the goal text.
 4. DO NOT assign agents — just write the goal text clearly.
 
+User Intent Profile (calibrate subtask depth accordingly):
+{profile_hint}
+
 Return ONLY valid JSON:
 {{
   "goals": [
@@ -961,7 +967,8 @@ User Query: {query}
 """.strip()
 
     async def decompose(
-        self, query: str, model: Optional[genai.GenerativeModel] = None
+        self, query: str, model: Optional[genai.GenerativeModel] = None,
+        profile_hint: str = "",
     ) -> List[TaskNode]:
         if model is None:
             logger.warning(
@@ -972,7 +979,7 @@ User Query: {query}
         # ── Phase 1: Neural DAG extraction ───────────────────────────────────
         logger.debug("[NeuroRuleDecomposer] Phase 1: neural goal DAG extraction.")
         try:
-            prompt = self._PHASE1_PROMPT.format(query=query)
+            prompt = self._PHASE1_PROMPT.format(query=query, profile_hint=profile_hint or "No profile available — treat all dimensions equally.")
             res = await asyncio.wait_for(
                 asyncio.to_thread(model.generate_content, prompt),
                 timeout=_NEURAL_PHASE_TIMEOUT_S,

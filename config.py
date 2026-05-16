@@ -27,7 +27,7 @@ class Config:
     # Flash is worth the extra latency here: a bad decomposition breaks the whole
     # run, and a miscalibrated judge triggers unnecessary Reflexion (+40s).
     # RAG uses Flash Lite (rag_config.py). CODE/CLOUD already use Flash (their own GEMINI_MODEL).
-    GENERATION_MODEL = "gemini-2.5-flash"
+    # GENERATION_MODEL = "gemini-flash-latest"
     GENERATION_MODEL = "gemini-3.1-flash-lite-preview"
     JUDGE_MODEL = "gpt-5.4"
 
