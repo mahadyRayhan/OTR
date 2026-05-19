@@ -1,0 +1,37 @@
+CUGCR EVALUATION REPORT
+======================================================================
+
+── 1. COMPRESSION ANALYSIS ──────────────────────────────────────────
+  Edges analyzed        : 920
+  Nodes analyzed        : 1248
+
+  Compression ratio (output_tokens / input_tokens):
+    Mean   : 0.891
+    Median : 0.902
+    P10    : 0.689
+    P90    : 1.081
+    Min    : 0.027
+    Max    : 1.293
+    Budget enforced (ratio<0.95): 69.2% of edges
+    Over-compressed (<15%):      0.7% of edges
+
+  CRS Gate:
+    Mean score       : 0.428
+    % below 0.25     : 14.6%  (would block compression)
+    Blocked events   : 69
+
+  Atom survival (mean per compressed edge):
+    Code blocks    : 0.63
+    Named entities : 5.07
+    Prose claims   : 2.20
+
+  Per-agent mean compression ratio:
+    cloud      : 0.743  (n=137)
+    code       : 0.905  (n=537)
+    rag        : 0.945  (n=246)
+
+  Node quality (internal 0-1 judge):
+    CUGCR triggered     : 0.748  (n=581)
+    CUGCR not triggered : 0.800  (n=567)
+
+======================================================================

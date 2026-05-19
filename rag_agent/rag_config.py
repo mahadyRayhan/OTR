@@ -5,9 +5,14 @@ All values are loaded from environment variables (or the .env file).
 Import the singleton `settings` anywhere in the project.
 """
 
+import os
 from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Absolute path to the rag_agent/ directory — used to anchor data paths
+# so the index always lives inside the agent folder regardless of CWD.
+_AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 class Settings(BaseSettings):
@@ -49,7 +54,6 @@ class Settings(BaseSettings):
     # ── Google Gemini ─────────────────────────────────────────────────────────
     gemini_api_key: str = Field("", description="Google Gemini API key")
     gemini_model: str = Field(
-        # "gemini-flash-latest",
         "gemini-3.1-flash-lite-preview",
         description="Gemini model (used when llm_provider=gemini)",
     )
@@ -71,15 +75,20 @@ class Settings(BaseSettings):
 
     # ── Embedding Model ──────────────────────────────────────────────────────
     embedding_model: str = Field(
-        "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract",
-        description="HuggingFace model ID for PubMedBERT sentence embeddings",
+        "all-MiniLM-L6-v2",
+        description="HuggingFace model ID used by ChromaDB and the cross-encoder device",
     )
-    embedding_batch_size: int = Field(32, description="Batch size for embedding inference")
-    embedding_device: str = Field("cpu", description="torch device: cpu | cuda | mps")
+    embedding_device: str = Field("cpu", description="torch device for cross-encoder: cpu | cuda | mps")
 
-    # ── FAISS Vector Store ───────────────────────────────────────────────────
-    faiss_index_path: str = Field("./data/faiss_index", description="Path to persisted FAISS index")
-    faiss_metadata_path: str = Field("./data/faiss_metadata.pkl", description="Pickled metadata store")
+    # ── ChromaDB Vector Store ────────────────────────────────────────────────
+    chroma_db_path: str = Field(
+        default_factory=lambda: os.path.join(_AGENT_DIR, "chroma_db"),
+        description="Path to ChromaDB persistent store for RAG papers",
+    )
+    chroma_collection_name: str = Field(
+        "rag_paper_vault",
+        description="ChromaDB collection name for indexed papers",
+    )
 
     # ── Topic Modeling ───────────────────────────────────────────────────────
     bertopic_model_path: str = Field("./models/bertopic_model", description="Path to saved BERTopic model")
@@ -91,30 +100,21 @@ class Settings(BaseSettings):
         "cross-encoder/ms-marco-MiniLM-L-6-v2",
         description="Cross-encoder model for stage-2 re-ranking",
     )
-    rerank_top_k: int = Field(20, description="Candidates passed to cross-encoder from FAISS")
+    rerank_top_k: int = Field(20, description="Candidates passed to cross-encoder from ChromaDB")
     final_top_k: int = Field(5, description="Final publications returned to the user")
+    confidence_threshold: float = Field(
+        -6.0,
+        description=(
+            "Minimum cross-encoder logit score to include a result (ms-marco space). "
+            "Typical ranges: >3 strong match, 0–3 relevant, -3–0 borderline, <-6 likely noise. "
+            "Lowered from -2.0: biomedical paper chunks score -2 to -5 on ms-marco CE even when "
+            "correctly matched (CE trained on web search, not academic text). "
+            "Falls back to top-K if all papers score below this threshold."
+        ),
+    )
 
     # ── ReAct Agent ──────────────────────────────────────────────────────────
     max_react_steps: int = Field(8, description="Hard cap on ReAct chain depth")
-    react_stop_threshold: float = Field(
-        0.85, description="Stop the chain when top-result confidence exceeds this"
-    )
-    confidence_threshold: float = Field(-10.0, description="Minimum score to include a result (ms-marco logit space; -10 is effectively no filter)")
-
-    # ── Application ──────────────────────────────────────────────────────────
-    app_host: str = Field("0.0.0.0")
-    app_port: int = Field(8000)
-    app_debug: bool = Field(False)
-    log_level: str = Field("INFO")
-    log_path: str = Field("./logs/app.log")
-
-    # ── Safety ───────────────────────────────────────────────────────────────
-    max_query_length: int = Field(512, description="Hard limit on incoming query characters")
-    pii_detection_enabled: bool = Field(True, description="Strip PII before forwarding to LLM")
-
-    @property
-    def is_gpu(self) -> bool:
-        return self.embedding_device in ("cuda", "mps")
 
     def build_llm_provider(self, provider_override=None):
         from .llm_provider import get_provider

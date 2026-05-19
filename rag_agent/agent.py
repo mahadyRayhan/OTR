@@ -43,7 +43,7 @@ def _build_context(papers: list[Paper], max_papers: int = 5) -> tuple[str, str]:
     top = papers[:max_papers]
     chunks = []
     for i, p in enumerate(top):
-        abstract = (p.abstract or "")[:600]
+        abstract = (p.abstract or "")[:2000]
         chunks.append(
             f"[{i+1}] {p.title} ({p.year})\n"
             f"Authors: {p.authors}\n"
@@ -250,7 +250,7 @@ async def call_rag_agent(
     # Use the pre-loaded kb passed by the caller (e.g. OrchestratorEngine).
     # The original code overwrote this with a fresh KnowledgeBase().load() every
     # call, reloading the embedding model + FAISS + cross-encoder each time (~30s).
-    if kb is None or not hasattr(kb, 'faiss'):
+    if kb is None or not hasattr(kb, 'chroma'):
         kb = KnowledgeBase()
         kb.load()
     provider = settings.build_llm_provider()

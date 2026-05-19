@@ -19,10 +19,6 @@ Fixes applied
       falls back to returning the raw query terms as a topic instead of
       mapping to the nearest neuroscience concept when nothing matches.
 
-  #5  EmbeddingModel.encode() now raises RuntimeError instead of silently
-      returning random vectors when sentence-transformers is unavailable.
-      Silent random-vector degradation produces noise that looks like signal.
-
   #6  _deduplicate() now merges on PMID first (two papers sharing a PMID are
       always the same paper regardless of title formatting), then falls back
       to normalised-title prefix matching for papers without a PMID.
@@ -34,14 +30,12 @@ import asyncio
 import json
 import logging
 import os
-import pickle
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import aiohttp
-import numpy as np
 
 from rag_agent.rag_config import settings
 
@@ -61,7 +55,7 @@ class Paper:
     pmid: str
     abstract: str
     score: float = 0.0
-    source: str = "faiss"          # faiss | semantic_scholar | pubmed
+    source: str = "chroma"         # chroma | semantic_scholar | pubmed
     tools: list[str] = field(default_factory=list)
     url: str = ""
 
@@ -160,118 +154,72 @@ def _infer_domain_tools(query: str) -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FAISS wrapper
+# ChromaDB wrapper
 # ─────────────────────────────────────────────────────────────────────────────
 
-class FAISSStore:
-    """Thin wrapper around a FAISS flat-IP index with a parallel metadata list."""
+class ChromaStore:
+    """ChromaDB collection with PubMedBERT embeddings (consistent with all other agents)."""
 
     def __init__(self) -> None:
-        self._index: Any = None
-        self._metadata: list[dict[str, Any]] = []
-        self._dim: int = 768  # PubMedBERT hidden size
+        self._client: Any = None
+        self._collection: Any = None
 
     def load(self) -> None:
         try:
-            import faiss  # type: ignore
+            import chromadb
+            from chromadb.utils import embedding_functions
 
-            idx_path = settings.faiss_index_path
-            meta_path = settings.faiss_metadata_path
-
-            if Path(idx_path).exists() and Path(meta_path).exists():
-                self._index = faiss.read_index(idx_path)
-                with open(meta_path, "rb") as f:
-                    self._metadata = pickle.load(f)
-                logger.info("FAISS index loaded: %d vectors", self._index.ntotal)
-            else:
-                # Bootstrap an empty index
-                self._index = faiss.IndexFlatIP(self._dim)
-                logger.warning("No FAISS index found at %s — starting empty.", idx_path)
+            Path(settings.chroma_db_path).mkdir(parents=True, exist_ok=True)
+            self._client = chromadb.PersistentClient(path=settings.chroma_db_path)
+            ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=settings.embedding_model
+            )
+            self._collection = self._client.get_or_create_collection(
+                name=settings.chroma_collection_name,
+                embedding_function=ef,
+                metadata={"hnsw:space": "cosine"},
+            )
+            logger.info("ChromaDB loaded: %d documents", self._collection.count())
         except ImportError:
-            logger.warning("faiss-cpu not installed — FAISS retrieval disabled.")
+            logger.warning("chromadb not installed — local retrieval disabled.")
 
-    def save(self) -> None:
-        if self._index is None:
+    def add(self, texts: list[str], metadatas: list[dict[str, Any]], ids: list[str]) -> None:
+        if self._collection is None:
             return
-        import faiss  # type: ignore
+        BATCH = 500
+        for i in range(0, len(texts), BATCH):
+            self._collection.add(
+                documents=texts[i:i + BATCH],
+                metadatas=metadatas[i:i + BATCH],
+                ids=ids[i:i + BATCH],
+            )
 
-        Path(settings.faiss_index_path).parent.mkdir(parents=True, exist_ok=True)
-        faiss.write_index(self._index, settings.faiss_index_path)
-        with open(settings.faiss_metadata_path, "wb") as f:
-            pickle.dump(self._metadata, f)
-        logger.info("FAISS index saved.")
-
-    def add(self, vectors: np.ndarray, metadata: list[dict[str, Any]]) -> None:
-        if self._index is None:
-            return
-        import faiss  # type: ignore
-
-        faiss.normalize_L2(vectors)
-        self._index.add(vectors)
-        self._metadata.extend(metadata)
-
-    def search(self, query_vector: np.ndarray, k: int = 20) -> list[dict[str, Any]]:
-        if self._index is None or self._index.ntotal == 0:
+    def search(self, query: str, k: int = 20) -> list[dict[str, Any]]:
+        if self._collection is None or self._collection.count() == 0:
             return []
-        import faiss  # type: ignore
+        n = min(k, self._collection.count())
+        results = self._collection.query(query_texts=[query], n_results=n)
+        hits = []
+        for doc, meta, dist in zip(
+            results["documents"][0], results["metadatas"][0], results["distances"][0]
+        ):
+            entry = dict(meta)
+            # Prefer stored abstract in metadata; fall back to the raw document text
+            entry["abstract"] = meta.get("abstract") or doc
+            entry["_chroma_score"] = float(1.0 - dist)  # cosine similarity
+            hits.append(entry)
+        return hits
 
-        faiss.normalize_L2(query_vector)
-        distances, indices = self._index.search(query_vector, k)
-        results = []
-        for dist, idx in zip(distances[0], indices[0]):
-            if idx < 0:
-                continue
-            meta = dict(self._metadata[idx])
-            meta["_faiss_score"] = float(dist)
-            results.append(meta)
-        return results
+    def count(self) -> int:
+        return self._collection.count() if self._collection else 0
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Embedding model
-# ─────────────────────────────────────────────────────────────────────────────
-
-class EmbeddingModel:
-    """PubMedBERT sentence encoder (lazy-loaded)."""
-
-    def __init__(self) -> None:
-        self._model: Any = None
-
-    def load(self) -> None:
-        try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
-
-            self._model = SentenceTransformer(
-                settings.embedding_model,
-                device=settings.embedding_device,
-            )
-            logger.info("Embedding model loaded: %s", settings.embedding_model)
-        except ImportError:
-            logger.warning("sentence-transformers not installed — embeddings disabled.")
-
-    def encode(self, texts: list[str]) -> np.ndarray:
-        """
-        Encode *texts* into dense vectors.
-
-        Fix #5 — previously returned random vectors when the embedding model
-        was unavailable, which produced noise that looked like valid signal.
-        Now raises RuntimeError so the failure is immediately visible instead
-        of silently corrupting downstream results.
-        """
-        if self._model is None:
-            raise RuntimeError(
-                "Embedding model is unavailable. "
-                "Install sentence-transformers (`pip install sentence-transformers`) "
-                "and ensure the model can be downloaded. "
-                "Returning random vectors would produce meaningless results."
-            )
-        return self._model.encode(
-            texts,
-            batch_size=settings.embedding_batch_size,
-            show_progress_bar=False,
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-        )
+    def reset(self) -> None:
+        if self._client is not None:
+            try:
+                self._client.delete_collection(settings.chroma_collection_name)
+            except Exception:
+                pass
+            self._collection = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -562,7 +510,7 @@ class CrossEncoderReranker:
             return papers
 
         # pairs = [(query, f"{p.title}. {p.abstract[:300]}") for p in papers] # debuggig - error with this line as some papers have abstract none
-        pairs = [(query, f"{p.title}. {(p.abstract or '')[:300]}") for p in papers]
+        pairs = [(query, f"{p.title}. {(p.abstract or '')[:800]}") for p in papers]
         scores = self._model.predict(pairs)
         for paper, score in zip(papers, scores):
             paper.score = round(float(score), 3)
@@ -587,8 +535,7 @@ class KnowledgeBase:
     """
 
     def __init__(self) -> None:
-        self.faiss = FAISSStore()
-        self.embedder = EmbeddingModel()
+        self.chroma = ChromaStore()
         self.topic_modeller = TopicModeller()
         self.reranker = CrossEncoderReranker()
         self.pubmed = PubMedFetcher()
@@ -597,8 +544,7 @@ class KnowledgeBase:
     def load(self) -> None:
         """Initialise all models and vector stores (call once at startup)."""
         logger.info("Loading KnowledgeBase components…")
-        self.faiss.load()
-        self.embedder.load()
+        self.chroma.load()
         self.topic_modeller.load()
         self.reranker.load()
         logger.info("KnowledgeBase ready.")
@@ -608,13 +554,12 @@ class KnowledgeBase:
     async def get_topic_landscape(self, query: str) -> list[Topic]:
         """
         Map the conceptual landscape of a research query.
-        Combines FAISS retrieval → BERTopic clustering → tool annotation.
+        Combines ChromaDB retrieval → BERTopic clustering → tool annotation.
         """
         t0 = time.perf_counter()
-        # 1. Retrieve candidate abstracts from FAISS
-        vec = self.embedder.encode([query])
-        faiss_hits = self.faiss.search(vec, k=40)
-        abstracts = [h.get("abstract", "") for h in faiss_hits if h.get("abstract")]
+        # 1. Retrieve candidate abstracts from ChromaDB
+        chroma_hits = self.chroma.search(query, k=40)
+        abstracts = [h.get("abstract", "") for h in chroma_hits if h.get("abstract")]
 
         # 2. Topic modelling over retrieved corpus
         topics = self.topic_modeller.get_topics_for_query(query, abstracts)
@@ -628,7 +573,7 @@ class KnowledgeBase:
         max_results: int | None = None,
     ) -> list[Paper]:
         """
-        Retrieve and re-rank papers from FAISS + live APIs.
+        Retrieve and re-rank papers from ChromaDB + live APIs.
 
         complexity: introductory | intermediate | advanced
             Used to bias re-ranking toward review / methodology / primary research.
@@ -637,16 +582,16 @@ class KnowledgeBase:
         # logger.warning("search_publications : Value of K '%s'", k)
 
         # 1. Parallel fetch from all sources
-        faiss_task = asyncio.create_task(self._faiss_papers(query))
+        chroma_task = asyncio.create_task(self._chroma_papers(query))
         pubmed_task = asyncio.create_task(self.pubmed.search(query, max_results=settings.rerank_top_k // 2))
         s2_task = asyncio.create_task(self.s2.search(query, limit=settings.rerank_top_k // 2))
 
-        faiss_papers, pubmed_papers, s2_papers = await asyncio.gather(
-            faiss_task, pubmed_task, s2_task
+        chroma_papers, pubmed_papers, s2_papers = await asyncio.gather(
+            chroma_task, pubmed_task, s2_task
         )
 
         # 2. Merge & deduplicate (Fix #6 — PMID-first deduplication)
-        all_papers = self._deduplicate(faiss_papers + pubmed_papers + s2_papers)
+        all_papers = self._deduplicate(chroma_papers + pubmed_papers + s2_papers)
         # logger.warning("all_papers : Paper found '%s'", len(all_papers))
 
         # Normalise None abstracts from live API responses
@@ -701,9 +646,8 @@ class KnowledgeBase:
 
     # ── Internals ─────────────────────────────────────────────────────────────
 
-    async def _faiss_papers(self, query: str) -> list[Paper]:
-        vec = self.embedder.encode([query])
-        hits = self.faiss.search(vec, k=settings.rerank_top_k)
+    async def _chroma_papers(self, query: str) -> list[Paper]:
+        hits = self.chroma.search(query, k=settings.rerank_top_k)
         papers = []
         for h in hits:
             papers.append(
@@ -711,11 +655,11 @@ class KnowledgeBase:
                     title=h.get("title", "Untitled"),
                     authors=h.get("authors", ""),
                     journal=h.get("journal", ""),
-                    year=h.get("year", 2000),
+                    year=int(h.get("year", 2000) or 2000),
                     pmid=h.get("pmid", ""),
                     abstract=h.get("abstract", ""),
-                    score=h.get("_faiss_score", 0.0),
-                    source="faiss",
+                    score=h.get("_chroma_score", 0.0),
+                    source="chroma",
                 )
             )
         return papers

@@ -210,7 +210,7 @@ def _build_profile_hint(dim: str, scores: dict) -> str:
 # These goals are used ONLY for atom-relevance scoring, not for the actual query.
 _COMPRESSION_GOALS: dict[tuple[str, str], str] = {
     ("code",    "cloud"):   "infrastructure requirements: compute resources, instance types, storage capacity, data volumes, and deployment specifications",
-    ("rag",     "code"):    "algorithms, API methods, function signatures, data formats, and implementation steps",
+    ("rag",     "code"):    "computational methods, algorithms, bioinformatics tools, analysis workflows, parameters, and technical procedures",
     ("rag",     "cloud"):   "deployment requirements, resource specifications, and infrastructure needs",
     ("scholar", "code"):    "technical methods, algorithms, and tools used by the researchers",
     ("scholar", "cloud"):   "infrastructure and compute requirements described by the researchers",
@@ -550,7 +550,7 @@ class OrchestratorEngine:
                     # not the raw task query. This prevents useful contexts from being
                     # blocked by the gate just because the queries are domain-shifted.
                     _crs_scoring_q = _compression_goal_for(previous_results, downstream_agent, query)
-                    ctx_emb   = self.embedder.encode([context[:800]])
+                    ctx_emb   = self.embedder.encode([context[:1500]])
                     query_emb = self.embedder.encode([_crs_scoring_q])
                     preliminary_crs = float(cosine_similarity(query_emb, ctx_emb)[0][0])
                 except Exception:
