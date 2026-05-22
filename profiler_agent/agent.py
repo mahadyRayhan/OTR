@@ -75,6 +75,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import google.generativeai as genai
@@ -634,12 +635,201 @@ def dominant_dim(query: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# NAIVE BAYES PROFILER (simple, fast, sklearn-based)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_NB_TRAINING_DATA = [
+    # CONCEPTUAL
+    ("Explain the Leiden community detection algorithm", Dim.CONCEPTUAL),
+    ("how its refinement phase guarantees well-connected communities", Dim.CONCEPTUAL),
+    ("Explain how the Leiden algorithm uses the Constant Potts Model", Dim.CONCEPTUAL),
+    ("why increasing gamma leads to smaller communities", Dim.CONCEPTUAL),
+    ("Describe the three algorithmic phases of Leiden", Dim.CONCEPTUAL),
+    ("Describe how the ABE7.10 editor achieves adenine deamination", Dim.CONCEPTUAL),
+    ("Explain the concept of bystander editing", Dim.CONCEPTUAL),
+    ("Explain how ABE editors are delivered into cells", Dim.CONCEPTUAL),
+    ("Explain the cytosine base editing mechanism in BE3", Dim.CONCEPTUAL),
+    ("Explain the statistical model behind DESeq2", Dim.CONCEPTUAL),
+    ("Describe the Weighted Nearest Neighbor WNN multimodal integration", Dim.CONCEPTUAL),
+    ("Explain how STAR handles chimeric read alignment", Dim.CONCEPTUAL),
+    # PROCEDURAL
+    ("Write a Python script using Scanpy to cluster a single-cell RNA-seq", Dim.PROCEDURAL),
+    ("Design an AWS EC2 r6i.4xlarge Terraform architecture with EFS", Dim.PROCEDURAL),
+    ("Write a Python script using leidenalg to cluster a NetworkX graph", Dim.PROCEDURAL),
+    ("Deploy as an AWS Batch job that processes multiple graph files from S3", Dim.PROCEDURAL),
+    ("Write a Python script that takes a gene FASTA scans for all NGG PAM sites", Dim.PROCEDURAL),
+    ("Design an AWS Batch architecture for genome-wide CBE site scanning", Dim.PROCEDURAL),
+    ("Write a Python script using pydeseq2 on a raw count matrix CSV", Dim.PROCEDURAL),
+    ("Write a Snakemake workflow defining rules for STAR two-pass alignment", Dim.PROCEDURAL),
+    ("Write a Python script using Scanpy and muon to perform WNN", Dim.PROCEDURAL),
+    ("Write a Python script that runs STAR alignment with chimSegmentMin via subprocess", Dim.PROCEDURAL),
+    # ANALYTICAL
+    ("evaluate both partitions using ARI against a known ground-truth partition", Dim.ANALYTICAL),
+    ("Explain the difference between modularity-based and CPM-based community detection", Dim.ANALYTICAL),
+    ("Explain the differences between ABE8e and earlier ABE versions", Dim.ANALYTICAL),
+    ("Explain how prime editing compares to ABE for installing corrections", Dim.ANALYTICAL),
+    ("Explain the difference between base editing CBE and CRISPR-Cas9 HDR", Dim.ANALYTICAL),
+    ("benchmarks WNN graph construction time with exact vs approximate kNN", Dim.ANALYTICAL),
+    ("Describe the difference between WNN-based integration and simple feature concatenation", Dim.ANALYTICAL),
+    ("what computational advantages this approach offers over re-running WNN", Dim.ANALYTICAL),
+    ("compare results to a single-factor model", Dim.ANALYTICAL),
+    ("what tradeoffs exist with respect to RNA off-target edits", Dim.ANALYTICAL),
+]
+
+_NB_MODEL_DIR  = Path(__file__).parent / "models"
+_NB_MODEL_PATH = _NB_MODEL_DIR / "profiler_model.pkl"
+_NB_VEC_PATH   = _NB_MODEL_DIR / "profiler_vectorizer.pkl"
+
+
+class _NBProfileState:
+    """
+    Thin façade that mirrors the DynamicProfiler.profile (UserProfile) interface
+    so that engine.py's `user_profiler.profile.profile` call still works.
+    """
+    def __init__(self, state_dict: Dict[Dim, float]) -> None:
+        self._state = state_dict
+
+    @property
+    def profile(self) -> Dict[Dim, float]:
+        return self._state
+
+
+class _IntentClassifier:
+    """sklearn Naive Bayes classifier with disk-based save/load."""
+
+    def __init__(self) -> None:
+        try:
+            from sklearn.feature_extraction.text import CountVectorizer
+            from sklearn.naive_bayes import MultinomialNB
+        except ImportError as exc:
+            raise ImportError(
+                "scikit-learn is required for PROFILER_MODE='naive_bayes'. "
+                "Install it with: pip install scikit-learn"
+            ) from exc
+
+        self._CountVectorizer = CountVectorizer
+        self._MultinomialNB   = MultinomialNB
+        self.vectorizer = CountVectorizer(stop_words="english")
+        self.classifier = MultinomialNB()
+        self._load_or_train()
+
+    def _load_or_train(self) -> None:
+        import pickle
+        if _NB_MODEL_PATH.exists() and _NB_VEC_PATH.exists():
+            with open(_NB_MODEL_PATH, "rb") as f:
+                self.classifier = pickle.load(f)
+            with open(_NB_VEC_PATH, "rb") as f:
+                self.vectorizer = pickle.load(f)
+        else:
+            logger.info("[SimpleProfiler] Training Naive Bayes model...")
+            _NB_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            texts  = [item[0] for item in _NB_TRAINING_DATA]
+            labels = [item[1].value for item in _NB_TRAINING_DATA]
+            X = self.vectorizer.fit_transform(texts)
+            self.classifier.fit(X, labels)
+            import pickle
+            with open(_NB_MODEL_PATH, "wb") as f:
+                pickle.dump(self.classifier, f)
+            with open(_NB_VEC_PATH, "wb") as f:
+                pickle.dump(self.vectorizer, f)
+            logger.info("[SimpleProfiler] Model trained and saved.")
+
+    def predict(self, query: str) -> Dict[Dim, float]:
+        """Return per-dimension probabilities summing to 100."""
+        X = self.vectorizer.transform([query])
+        probs = self.classifier.predict_proba(X)[0]
+        result = {Dim(cls): prob * 100.0 for cls, prob in zip(self.classifier.classes_, probs)}
+        for d in DIMS:
+            result.setdefault(d, 0.0)
+        return result
+
+
+class SimpleProfiler:
+    """
+    Lightweight profiler using a pre-trained Naive Bayes classifier and
+    Exponential Moving Average (EMA) update — no LLM call, no Dirichlet math.
+
+    Public API matches DynamicProfiler so the engine needs no changes.
+    """
+
+    def __init__(self, learning_rate: float = 0.4) -> None:
+        self._classifier   = _IntentClassifier()
+        self.learning_rate = learning_rate
+        self.n_queries     = 0
+        self._state: Dict[Dim, float] = {d: 100.0 / N_DIM for d in DIMS}
+        # Façade object so engine.py's `user_profiler.profile.profile` works
+        self.profile = _NBProfileState(self._state)
+
+    async def update_profile(
+        self, query: str, model=None
+    ) -> Dict[str, float]:
+        """EMA update. `model` arg accepted but ignored (no LLM call)."""
+        self.n_queries += 1
+        new_intent = self._classifier.predict(query)
+        lr = self.learning_rate
+        for d in DIMS:
+            self._state[d] = self._state[d] * (1 - lr) + new_intent[d] * lr
+        total = sum(self._state.values())
+        for d in DIMS:
+            self._state[d] = (self._state[d] / total) * 100.0
+        return {d.value: v for d, v in self._state.items()}
+
+    def get_style_guideline(self, *, use_session: bool = False) -> str:
+        """Same output contract as DynamicProfiler."""
+        p = self._state
+        lines = [
+            "RESPONSE STYLE PROFILE (user-adaptive, naive-bayes):",
+            f"  Conceptual / Theory:         {p[Dim.CONCEPTUAL]:5.1f}%",
+            f"  Procedural / Code:           {p[Dim.PROCEDURAL]:5.1f}%",
+            f"  Analytical / Evaluation:     {p[Dim.ANALYTICAL]:5.1f}%",
+            "",
+            "INSTRUCTIONS:",
+        ]
+        dominant = max(p, key=p.get)
+        if dominant == Dim.PROCEDURAL and p[Dim.PROCEDURAL] > 40:
+            lines.append("  - Lead with working code; keep explanations brief.")
+        elif dominant == Dim.ANALYTICAL and p[Dim.ANALYTICAL] > 40:
+            lines.append("  - Lead with comparisons, evidence, and trade-offs.")
+            lines.append("  - Cite relevant literature or benchmarks where possible.")
+        elif dominant == Dim.CONCEPTUAL and p[Dim.CONCEPTUAL] > 40:
+            lines.append("  - Lead with clear conceptual explanation; use analogies.")
+            lines.append("  - Avoid code unless it directly illustrates the concept.")
+        else:
+            lines.append("  - Balance explanation, code, and analysis proportionally.")
+        return "\n".join(lines)
+
+    def summary(self) -> str:
+        p = self._state
+        return (
+            f"SimpleProfiler(n={self.n_queries}, "
+            f"C={p[Dim.CONCEPTUAL]:.1f}%, P={p[Dim.PROCEDURAL]:.1f}%, "
+            f"A={p[Dim.ANALYTICAL]:.1f}%)"
+        )
+
+    def reset_session(self) -> None:
+        pass  # no separate session model in NB profiler
+
+    def reset_all(self) -> None:
+        self.n_queries = 0
+        for d in DIMS:
+            self._state[d] = 100.0 / N_DIM
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # GLOBAL SINGLETON
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Shared profiler that persists across the session.
 # Call reset_all() for a new user; reset_session() for a new conversation.
-user_profiler = DynamicProfiler()
+
+def _build_profiler():
+    import config as _cfg
+    mode = getattr(_cfg.Config, "PROFILER_MODE", "dirichlet")
+    if mode == "naive_bayes":
+        return SimpleProfiler()
+    return DynamicProfiler()
+
+user_profiler = _build_profiler()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

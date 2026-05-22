@@ -139,6 +139,29 @@ CRITICAL RULES FOR GENERATION (YOU MUST FOLLOW THESE EXACTLY):
 # ---------------------------------------------------------------------------
 # Provenance Ratio Parser
 # ---------------------------------------------------------------------------
+def _depth_reasoning_prefix(depth: int) -> str:
+    """Returns a reasoning instruction block appended to the prompt at depth > 1."""
+    if depth <= 1:
+        return ""
+    if depth == 2:
+        return (
+            "\n\nREASONING REQUIREMENT (depth=2): Before writing any code, "
+            "write a short algorithmic plan as Python comments: "
+            "# PLAN: (1) inputs and their types, (2) key processing steps, (3) expected output. "
+            "Then write the complete implementation below the plan."
+        )
+    return (
+        "\n\nREASONING REQUIREMENT (depth=3): This is a high-priority node requiring rigorous output. "
+        "Structure your response in three clearly commented sections:\n"
+        "# --- ANALYSIS ---\n"
+        "# Understand inputs/outputs, identify edge cases and error conditions.\n"
+        "# --- IMPLEMENTATION ---\n"
+        "# Complete, executable script following all provenance rules.\n"
+        "# --- SELF-REVIEW ---\n"
+        "# Note any assumptions made, known limitations, and potential failure points."
+    )
+
+
 def parse_provenance_ratio(code: str) -> dict:
     """
     Scan the generated code for [KB-SOURCE: ...] and [AI-GENERATED] tags.
@@ -191,31 +214,39 @@ def parse_provenance_ratio(code: str) -> dict:
 # Public Entry Point (Called by Orchestrator)
 # ---------------------------------------------------------------------------
 async def call_code_agent(
-    user_input: str, 
-    strategy: str = "cot", 
-    depth: int = 1, 
+    user_input: str,
+    strategy: str = "cot",
+    depth: int = 1,
     agent_registry: str = ""
-) -> str:
+) -> tuple[str, dict]:
     """
     Called by orchestrator/engine.py -> _execute_agent() when agent_name == "code".
+    Returns (output_text, tokens_dict).
     """
+    _zero = {"input": 0, "output": 0}
     model = _get_model()
     if not model:
-        return f"[Code Agent - Mock] No API Key. Would generate code for: {user_input}"
+        return f"[Code Agent - Mock] No API Key. Would generate code for: {user_input}", _zero
 
     try:
         # 1. Retrieve trusted code chunks and pipeline logic from ChromaDB
         retrieved_context = _query_vector_db(user_input, n_results=5)
-        
-        if not retrieved_context.strip():
-            return "[Code Agent] ERROR: Local Vector DB is empty or missing. Please run build_vector_db.py to ingest the .ipynb notebooks."
 
-        # 2. Build the Provenance Prompt
+        if not retrieved_context.strip():
+            return "[Code Agent] ERROR: Local Vector DB is empty or missing. Please run build_vector_db.py to ingest the .ipynb notebooks.", _zero
+
+        # 2. Build the Provenance Prompt (depth > 1 injects a reasoning requirement)
         prompt = PROVENANCE_PROMPT.format(subtask=user_input, context=retrieved_context)
-        
+        prompt += _depth_reasoning_prefix(depth)
+
         # 3. Generate the script via Gemini
         response = await asyncio.to_thread(model.generate_content, prompt)
         output_text = response.text.strip()
+        _usage = getattr(response, "usage_metadata", None)
+        _agent_tokens = {
+            "input":  getattr(_usage, "prompt_token_count", 0) or 0,
+            "output": getattr(_usage, "candidates_token_count", 0) or 0,
+        }
         
         # 4. Extract just the Python code
         clean_python_script = []
@@ -262,7 +293,7 @@ async def call_code_agent(
         )
         if "```" not in final_output:
             final_output = f"[STRUCTURAL_FAIL: no code block generated]\n{final_output}"
-        return final_output
+        return final_output, _agent_tokens
 
     except Exception as e:
-        return f"[Code Agent Error] {e}"
+        return f"[Code Agent Error] {e}", {"input": 0, "output": 0}

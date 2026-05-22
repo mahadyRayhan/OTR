@@ -190,7 +190,7 @@ async def run_single(query_item: dict, client: AsyncOpenAI) -> dict:
     print(f"  [{qid}] {query[:65]}...")
     t0 = time.monotonic()
     try:
-        response = await call_cloud_agent(user_input=query)
+        response, _ = await call_cloud_agent(user_input=query)
         error = None
     except Exception as exc:
         response = f"[ERROR] {exc}"
@@ -301,3 +301,24 @@ if __name__ == "__main__":
 #   CCQ08        9   100%    10.7           ✓  cost_optimization
 #   CCQ09        8   100%     9.6           ✓  containers
 #   CCQ10       10    33%    11.8     ⚠     ✓  ai_structural_biology
+
+# ----------------------- Latest run (2024-06-20) ─────────────────────────────────────────
+# Queries run          : 10
+#   Pass rate            : 90%  (threshold ≥ 7/10)
+#   Mean judge score     : 8.70 / 10
+#   Mean keyword hit     : 66%  (ground-truth KB terms)
+#   Extrapolation warns  : 100%  (tool not in KB)
+#   Mean latency         : 5.7 s
+
+#   ID       Score   KW%  Lat(s)  Warn  Pass  Category
+#   ─────── ────── ───── ─────── ───── ─────  ──────────────────────
+#   CCQ01        8    80%    17.4     ⚠     ✓  genomics_hpc
+#   CCQ02       10    67%     3.9     ⚠     ✓  genomics_hpc
+#   CCQ03        8   100%     4.3     ⚠     ✓  single_cell
+#   CCQ04       10     0%     6.8     ⚠     ✓  single_cell
+#   CCQ05        6    75%     4.7     ⚠     ✗  ml_gpu
+#   CCQ06        9    33%     4.0     ⚠     ✓  ml_gpu
+#   CCQ07        9    33%     4.4     ⚠     ✓  cost_optimization
+#   CCQ08        9    67%     3.6     ⚠     ✓  cost_optimization
+#   CCQ09        9   100%     4.2     ⚠     ✓  containers
+#   CCQ10        9   100%     4.2     ⚠     ✓  ai_structural_biology

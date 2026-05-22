@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import contextvars
 import time
 import math
 import re
@@ -13,6 +14,19 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+
+# Per-call token accumulator — set in call_scholar_agent, read by internal LLM helpers
+_scholar_token_acc: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_scholar_token_acc", default=None
+)
+
+def _scholar_add_tokens(response) -> None:
+    acc = _scholar_token_acc.get()
+    if acc is None:
+        return
+    _usage = getattr(response, "usage_metadata", None)
+    acc["input"]  += getattr(_usage, "prompt_token_count", 0) or 0
+    acc["output"] += getattr(_usage, "candidates_token_count", 0) or 0
 
 # macOS Python.org builds lack system CA bundle — disable cert check for S2 API
 _SSL_CTX = ssl.create_default_context()
@@ -203,6 +217,7 @@ async def extract_search_topic(query: str, model) -> str:
     )
     try:
         res = await asyncio.to_thread(model.generate_content, prompt)
+        _scholar_add_tokens(res)
         return res.text.strip().lower()
     except Exception:
         return query
@@ -260,6 +275,7 @@ Reason: [one sentence]
 RetryQuery: [a better search string if score < 7 AND found < requested, otherwise write NONE]
 """
         response = await asyncio.to_thread(model.generate_content, prompt)
+        _scholar_add_tokens(response)
         raw = response.text.strip()
 
         score = 5  # safe default
@@ -663,7 +679,16 @@ async def call_scholar_agent(
     strategy: str = "cot",
     depth: int = 1,
     agent_registry: str = "",
-) -> str:
+) -> tuple[str, dict]:
+    _acc = {"input": 0, "output": 0}
+    _tok = _scholar_token_acc.set(_acc)
+
+    # depth > 1: raise internal quality bar (harder judge threshold → more self-correction)
+    # depth >= 3: also broaden expert search by +1 to increase coverage
+    effective_threshold = JUDGE_SCORE_THRESHOLD + max(0, depth - 1)  # 7 → 8 → 9
+    if depth >= 3:
+        limit = limit + 1
+
     llm = get_llm_model()
     clean_topic = await extract_search_topic(user_input, llm)
     print(f"   [System] Cleaned query for API: '{clean_topic}' | Requesting {limit} expert(s)")
@@ -736,13 +761,13 @@ async def call_scholar_agent(
     # Retry whenever quality is low — not only on shortfall.
     # -------------------------------------------------------
     if (
-        judge_result["score"] < JUDGE_SCORE_THRESHOLD
+        judge_result["score"] < effective_threshold
         and judge_result["retry_query"]
     ):
         retry_topic = judge_result["retry_query"]
         print(
-            f"   [Self-correction] Judge score {judge_result['score']}/10 < {JUDGE_SCORE_THRESHOLD}. "
-            f"Retrying with suggested query: '{retry_topic}'"
+            f"   [Self-correction] Judge score {judge_result['score']}/10 < {effective_threshold} "
+            f"(depth={depth}). Retrying with suggested query: '{retry_topic}'"
         )
         retry_experts = await agent_instance.find_experts_by_topic(
             retry_topic, limit=limit
@@ -795,4 +820,5 @@ async def call_scholar_agent(
     )
     if not experts_list:
         result = f"[STRUCTURAL_FAIL: 0 experts retrieved — API returned no results for this topic]\n{result}"
-    return result
+    _scholar_token_acc.reset(_tok)
+    return result, _acc

@@ -118,7 +118,7 @@ async def run_single(query_item: dict, client: AsyncOpenAI) -> dict:
     print(f"  [{qid}] {query[:60]}...")
     t0 = time.monotonic()
     try:
-        response = await call_scholar_agent(
+        response, _ = await call_scholar_agent(
             user_input=query,
             is_collaboration=is_collab,
             limit=limit,
@@ -225,3 +225,45 @@ if __name__ == "__main__":
 #   SQ08        8    yes     5.1     ✓  The response lists real researchers and highly rel
 #   SQ09        7    yes     8.2     ✓  The response names real researchers and relevant C
 #   SQ10        7    yes     7.2     ✓  The response names real Oxford Nanopore-associate
+
+# -------------------- Latest Evaluation (2024-06-10) --------------------
+#  Summary ──────────────────────────────────────────────────
+#   Queries run   : 10
+#   Pass rate     : 50%  (threshold ≥ 7/10)
+#   Mean score    : 6.00 / 10
+#   Cache used    : 100%  of queries needed cache fallback
+#   Mean latency  : 3.8 s
+
+#   ID      Score  Cache  Lat(s)  Pass  Rationale
+#   ────── ────── ────── ─────── ─────  ────────────────────────────────────────
+#   SQ01        7    yes    18.2     ✓  The response names real and mostly relevant single
+#   SQ02        4    yes     2.3     ✗  The response includes some genuinely relevant spat
+#   SQ03        7    yes     1.6     ✓  The response identifies genuinely relevant ATAC-se
+#   SQ04        5    yes     2.1     ✗  The response includes real names and relevant pape
+#   SQ05        5    yes     1.8     ✗  The response includes real researchers and papers 
+#   SQ06        5    yes     1.8     ✗  The response is partly on-topic and includes names
+#   SQ07        5    yes     2.2     ✗  The response includes real researchers, paper titl
+#   SQ08        8    yes     2.1     ✓  The response names real researchers and highly rel
+#   SQ09        7    yes     3.0     ✓  The response provides real researchers and relevan
+#   SQ10        7    yes     3.2     ✓  The response names real and mostly relevant Oxford
+
+# -------------- Latest Evaluation (2024-06-10) --------------------
+# ── Summary ──────────────────────────────────────────────────
+#   Queries run   : 10
+#   Pass rate     : 60%  (threshold ≥ 7/10)
+#   Mean score    : 6.20 / 10
+#   Cache used    : 100%  of queries needed cache fallback
+#   Mean latency  : 3.4 s
+
+#   ID      Score  Cache  Lat(s)  Pass  Rationale
+#   ────── ────── ────── ─────── ─────  ────────────────────────────────────────
+#   SQ01        7    yes    17.4     ✓  The response includes real researchers, papers, ci
+#   SQ02        5    yes     1.9     ✗  The response includes some genuinely relevant spat
+#   SQ03        7    yes     1.8     ✓  The response identifies highly relevant ATAC-seq/c
+#   SQ04        5    yes     1.8     ✗  The response includes real names and papers clearl
+#   SQ05        5    yes     1.6     ✗  The response includes real researchers, paper titl
+#   SQ06        7    yes     1.6     ✓  The response identifies plausible researchers and 
+#   SQ07        4    yes     2.6     ✗  The response includes real names, papers, and cita
+#   SQ08        8    yes     1.9     ✓  The response identifies real, highly relevant expe
+#   SQ09        7    yes     1.9     ✓  The response provides real researchers and relevan
+#   SQ10        7    yes     1.6     ✓  The response names real and mostly relevant Oxford

@@ -17,6 +17,7 @@ Returns:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import re
 import os
@@ -37,6 +38,11 @@ from dotenv import load_dotenv
 load_dotenv()
  
 logger = logging.getLogger(__name__)
+
+# Per-call token accumulator — set in call_rag_agent, updated by every _llm() call
+_rag_token_acc: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_rag_token_acc", default=None
+)
  
  
 def _build_context(papers: list[Paper], max_papers: int = 5) -> tuple[str, str]:
@@ -60,6 +66,10 @@ async def _llm(provider, prompt: str, max_tokens: int = 8192) -> str:
             messages=[{"role": "user", "content": prompt}],
             max_tokens=max_tokens,
         )
+        acc = _rag_token_acc.get()
+        if acc is not None:
+            acc["input"]  += response.input_tokens
+            acc["output"] += response.output_tokens
         return response.text.strip()
     except Exception as e:
         logger.warning("LLM call failed: %s", e)
@@ -247,6 +257,9 @@ async def call_rag_agent(
     if strategy not in _STRATEGIES:
         raise ValueError(f"Unknown strategy '{strategy}'. Choose from: {list(_STRATEGIES.keys())}")
 
+    _acc = {"input": 0, "output": 0}
+    _tok = _rag_token_acc.set(_acc)
+
     # Use the pre-loaded kb passed by the caller (e.g. OrchestratorEngine).
     # The original code overwrote this with a fresh KnowledgeBase().load() every
     # call, reloading the embedding model + FAISS + cross-encoder each time (~30s).
@@ -290,11 +303,13 @@ async def call_rag_agent(
     if not papers and len(answer.strip()) < 80:
         answer = f"[STRUCTURAL_FAIL: no papers retrieved and answer is too short]\n{answer}"
 
+    _rag_token_acc.reset(_tok)
     return {
-        "answer": answer,
-        "quality": "N/A (judged externally by GoT)",
-        "strategy": strategy.upper(),
+        "answer":     answer,
+        "quality":    "N/A (judged externally by GoT)",
+        "strategy":   strategy.upper(),
         "source_used": source_titles,
         "paper_count": len(papers),
+        "tokens":     _acc,
     }
  

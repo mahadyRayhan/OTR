@@ -180,7 +180,7 @@ async def run_single(query_item: dict, client: AsyncOpenAI) -> dict:
     print(f"  [{qid}] {query[:65]}...")
     t0 = time.monotonic()
     try:
-        response = await call_code_agent(user_input=query)
+        response, _ = await call_code_agent(user_input=query)
         error = None
     except Exception as exc:
         response = f"[ERROR] {exc}"
@@ -281,23 +281,23 @@ if __name__ == "__main__":
     asyncio.run(main(args.queries, args.out))
 
 # ── Summary ──────────────────────────────────────────────────
-#   Queries run        : 10
+# Queries run        : 10
 #   Pass rate          : 100%  (threshold ≥ 7/10)
-#   Mean judge score   : 9.40 / 10
+#   Mean judge score   : 9.20 / 10
 #   Mean keyword hit   : 95%  (ground-truth functions)
-#   Mean AI-generated  : 43.1%  of code lines
-#   Mean KB-sourced    : 56.9%  of code lines
-#   Mean latency       : 13.5 s
+#   Mean AI-generated  : 48.0%  of code lines
+#   Mean KB-sourced    : 52.0%  of code lines
+#   Mean latency       : 3.0 s
 
 #   ID      Score   KW%   AI%   KB%  Lat(s)  Pass  Category
 #   ────── ────── ───── ───── ───── ─────── ─────  ────────────────────
-#   CQ01       10   100%   92%    8%    24.0     ✓  clustering_pipeline
-#   CQ02       10   100%   44%   56%    10.1     ✓  visualization
-#   CQ03       10    50%   29%   71%    15.5     ✓  preprocessing_pearson
-#   CQ04        9   100%   57%   43%     9.7     ✓  trajectory
-#   CQ05        8   100%   58%   42%    13.3     ✓  integration
-#   CQ06       10   100%   23%   77%    11.7     ✓  visualization
-#   CQ07       10   100%   38%   62%     8.6     ✓  qc_filtering
-#   CQ08       10   100%   62%   38%    12.7     ✓  full_pipeline
-#   CQ09        8   100%   29%   71%    13.9     ✓  marker_genes
-#   CQ10        9   100%    0%  100%    15.9     ✓  normalization
+#   CQ01       10   100%   89%   11%    12.4     ✓  clustering_pipeline
+#   CQ02       10   100%   13%   87%     1.4     ✓  visualization
+#   CQ03        8    50%   29%   71%     2.0     ✓  preprocessing_pearson
+#   CQ04        7   100%   57%   43%     3.0     ✓  trajectory
+#   CQ05        8   100%    7%   93%     2.3     ✓  integration
+#   CQ06       10   100%   41%   59%     1.5     ✓  visualization
+#   CQ07        9   100%   43%   57%     2.2     ✓  qc_filtering
+#   CQ08       10   100%   90%   10%     2.2     ✓  full_pipeline
+#   CQ09       10   100%   71%   29%     1.9     ✓  marker_genes
+#   CQ10       10   100%   40%   60%     1.3     ✓  normalization

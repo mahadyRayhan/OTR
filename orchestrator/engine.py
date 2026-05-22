@@ -462,6 +462,9 @@ class OrchestratorEngine:
         strategy_match = re.search(r'--strategy=(\w+)', query.lower())
         strategy = strategy_match.group(1) if strategy_match else "cot"
         clean_query = re.sub(r'--strategy=\w+', '', query).strip()
+        _depth_override = config.Config.DEFAULT_DEPTH
+        if _depth_override is not None:
+            depth = _depth_override
         meta: dict = {"agent": agent_name, "strategy": strategy, "depth": depth}
 
         # Append profile-driven depth instruction to every non-scholar agent.
@@ -472,7 +475,8 @@ class OrchestratorEngine:
 
         try:
             if agent_name == "code":
-                result = await call_code_agent(clean_query, strategy, depth, agent_registry)
+                result, agent_tokens = await call_code_agent(clean_query, strategy, depth, agent_registry)
+                meta["tokens"] = agent_tokens
                 return result, meta
             if agent_name == "cloud":
                 # Use per-query dim hint for cloud profile string instead of
@@ -482,7 +486,8 @@ class OrchestratorEngine:
                     profile_str  = _cloud_hints.get("cloud", "")
                 else:
                     profile_str = ""
-                result = await call_cloud_agent(clean_query, strategy, depth, agent_registry, profile_str)
+                result, agent_tokens = await call_cloud_agent(clean_query, strategy, depth, agent_registry, profile_str)
+                meta["tokens"] = agent_tokens
                 return result, meta
             if agent_name == "scholar":
                 limit = 1
@@ -492,12 +497,14 @@ class OrchestratorEngine:
                     query_normalized = re.sub(rf'\b{word}\b', digit, query_normalized)
                 match = re.search(r'\b([1-5])\b', query_normalized)
                 if match: limit = int(match.group(1))
-                result = await call_scholar_agent(clean_query, False, "Unknown", limit, strategy, depth, agent_registry)
+                result, agent_tokens = await call_scholar_agent(clean_query, False, "Unknown", limit, strategy, depth, agent_registry)
+                meta["tokens"] = agent_tokens
                 return result, meta
             else:
                 rag_data = await call_rag_agent(kb=self.kb, user_input=clean_query, strategy=strategy, depth=depth, agent_registry=agent_registry)
                 meta["paper_count"] = rag_data.get("paper_count", 0)
                 meta["rag_source"] = rag_data.get("source_used", "")
+                meta["tokens"] = rag_data.get("tokens", {"input": 0, "output": 0})
                 result = f"Source: {rag_data.get('source_used')}\nAnswer: {rag_data.get('answer', '')}"
                 return result, meta
         except Exception as e:
@@ -701,6 +708,117 @@ class OrchestratorEngine:
 
         return tasks, decomposer_name
 
+    async def _execute_linear(
+        self,
+        user_input: str,
+        tasks: list,
+        ablation_mode: str,
+        style_guideline: str,
+    ) -> tuple[str, list, dict]:
+        """
+        Linear sequential execution for react_cot_context / react_cot_no_context.
+
+        Agents run one by one in task-list order (topological order guaranteed by
+        the decomposer).  No quality gates, no GoT expansion, no retry loop.
+
+        react_cot_no_context  — each agent receives only its own sub-question.
+        react_cot_context     — each agent also receives the raw concatenated output
+                                of all tasks it depends on (mirrors existing 'raw' mode,
+                                no CUGCR compression).
+
+        Returns (final_answer, dag_nodes_dump, orchestrator_tokens).
+        """
+        results: dict[int, str] = {}          # task.id → agent output
+        dag_nodes_dump: list[dict] = []
+        orchestrator_tokens = {"input": 0, "output": 0}
+
+        for task in tasks:
+            # Build the query sent to this agent
+            if ablation_mode == "react_cot_context" and task.depends_on:
+                ctx_parts = [
+                    f"--- Result from task {dep} ---\n{results[dep]}"
+                    for dep in task.depends_on
+                    if dep in results
+                ]
+                ctx = "\n\n".join(ctx_parts)
+                agent_query = f"{task.query}\n\n[UPSTREAM CONTEXT]:\n{ctx}"
+
+                # Log to comm_tracker so communication metrics are recorded
+                if ctx_parts:
+                    upstream_agent = next(
+                        (t.agent for t in tasks if t.id == task.depends_on[0]), "unknown"
+                    )
+                    comm_tracker.log_injection(
+                        wave=1,
+                        from_ids=[str(task.depends_on[0])],
+                        to_id=str(task.id),
+                        to_agent=task.agent,
+                        context=ctx,
+                        orig_query=task.query,
+                        resolved_query=agent_query,
+                        low_confidence=False,
+                    )
+            else:
+                agent_query = task.query
+
+            t0 = time.monotonic()
+            print(f"      [Linear] Task {task.id} [{task.agent.upper()}]: {task.query[:60]}...")
+            result, agent_meta = await self._execute_agent(task.agent, agent_query, depth=1)
+            elapsed = round(time.monotonic() - t0, 2)
+            print(f"      [Done]   Task {task.id} [{task.agent.upper()}] ← {elapsed}s")
+
+            results[task.id] = result
+
+            # Update comm_tracker with the agent's output (for CUS scoring)
+            if ablation_mode == "react_cot_context" and task.depends_on:
+                comm_tracker.update_result(to_id=str(task.id), output=result, quality=0.0)
+
+            dag_nodes_dump.append({
+                "node_id":              str(task.id),
+                "agent":                task.agent,
+                "query":                task.query,
+                "operator":             "root",
+                "depth":                1,
+                "parent_ids":           [str(d) for d in (task.depends_on or [])],
+                "failure_mode":         None,
+                "quality_score":        None,
+                "judge_critique":       None,
+                "elapsed_s":            elapsed,
+                "output":               result,
+                "context_relevance_pct": None,
+                "context_utilized_pct":  None,
+                "context_tokens":        0,
+                "crs_gate_blocked":      False,
+                "dependency_accuracy":   True,
+                "cugcr_triggered":       False,
+                "preliminary_crs":       None,
+                "paper_count":           agent_meta.get("paper_count"),
+                "rag_strategy":          agent_meta.get("strategy"),
+                "tokens_in":             agent_meta.get("tokens", {}).get("input", 0),
+                "tokens_out":            agent_meta.get("tokens", {}).get("output", 0),
+            })
+
+        # Synthesize final answer from all agent outputs
+        all_outputs = "\n\n".join(
+            f"[{r['agent'].upper()} Agent]\n{r['output']}"
+            for r in dag_nodes_dump
+        )
+        synth_prompt = (
+            f"Synthesize a comprehensive final answer to the user's query "
+            f"using ONLY the agent outputs below.\n\n"
+            f"User Query: \"{user_input}\"\n\n"
+            f"Agent Outputs:\n{all_outputs}\n\n"
+            f"{style_guideline}\n\nFinal Answer:"
+        ).strip()
+
+        resp = await asyncio.to_thread(self.llm.generate_content, synth_prompt)
+        if hasattr(resp, "usage_metadata") and resp.usage_metadata:
+            orchestrator_tokens["input"]  += getattr(resp.usage_metadata, "prompt_token_count", 0) or 0
+            orchestrator_tokens["output"] += getattr(resp.usage_metadata, "candidates_token_count", 0) or 0
+        final_answer = resp.text.strip()
+
+        return final_answer, dag_nodes_dump, orchestrator_tokens
+
     async def _execute_pipeline(self, user_input: str, decomposer_name: str, ablation_mode: str = "adaptive", start_time: float = None, cached_tasks=None) -> Dict[str, Any]:
         self.current_run_cugcr_triggered = False
         self._node_metadata = {}
@@ -747,7 +865,40 @@ class OrchestratorEngine:
         profiler_latency_ms = None
         orchestrator_tokens = {"input": 0, "output": 0}
 
-        if dag_dict.get("is_got"):
+        _LINEAR_MODES = ("react_cot_context", "react_cot_no_context")
+        is_linear = ablation_mode in _LINEAR_MODES
+
+        if is_linear:
+            if profiler_task:
+                await profiler_task
+            profiler_latency_ms = round((time.monotonic() - profiler_t0) * 1000)
+
+            if config.Config.USE_PROFILER:
+                if config.Config.RUN_MODE == "benchmark":
+                    _dom_hints = _PROFILE_DEPTH_HINTS.get(_query_dom_dim, {})
+                    style_guideline = (
+                        f"RESPONSE STYLE PROFILE (per-query):\n"
+                        f"  Dominant intent: {_query_dom_dim.upper()} "
+                        f"({_query_dim_scores[_query_dom_dim]:.0f}%)\n"
+                        f"  Instruction: {_dom_hints.get('rag', '')}"
+                    )
+                else:
+                    style_guideline = user_profiler.get_style_guideline(use_session=False)
+            else:
+                style_guideline = ""
+
+            print(f"\n   [Linear] Mode={ablation_mode.upper()} — sequential execution, no GoT.")
+            final_answer, dag_nodes_dump, orchestrator_tokens = await self._execute_linear(
+                user_input, tasks, ablation_mode, style_guideline
+            )
+
+            # Judge skipped in linear modes — score is never used (no retry loop).
+            judge_score_raw = "Score: N/A - judge skipped in linear mode"
+            numeric_score = 0
+            retry_events = []
+            retries = 0
+
+        elif dag_dict.get("is_got"):
             if profiler_task:
                 await profiler_task
             profiler_latency_ms = round((time.monotonic() - profiler_t0) * 1000)
@@ -886,18 +1037,23 @@ class OrchestratorEngine:
             print("\n   [GoT DAG] Commencing Adaptive Wave Execution...")
             final_answer = await got_orchestrator.run(
                 tasks=tasks,
-                user_profile=user_profiler.profile if config.Config.USE_PROFILER else None, 
-                model=self.llm,
+                user_profile=user_profiler.profile if config.Config.USE_PROFILER else None,
+                model=self.llm if config.Config.USE_AGENT_JUDGE else None,
                 agent_executor=got_executor
             )
             
         else:
             final_answer = "Error: System currently requires 'got_dag' builder."
 
-        print("⚖️  [Orchestrator] Final Global Evaluation...")
-        judge_score_raw = await self._gpt_as_judge(user_input, final_answer)
-        match = re.search(r'Score:\s*(\d+)/10', judge_score_raw, re.IGNORECASE)
-        numeric_score = int(match.group(1)) if match else 0
+        if not is_linear:
+            if config.Config.USE_FINAL_JUDGE:
+                print("⚖️  [Orchestrator] Final Global Evaluation...")
+                judge_score_raw = await self._gpt_as_judge(user_input, final_answer)
+                match = re.search(r'Score:\s*(\d+)/10', judge_score_raw, re.IGNORECASE)
+                numeric_score = int(match.group(1)) if match else 0
+            else:
+                judge_score_raw = "Score: N/A - final judge disabled"
+                numeric_score = 0
 
         # First pass: build dag_nodes_dump with execution metadata only.
         # Context metrics (relevance, utilization, dependency_accuracy) are computed
@@ -929,13 +1085,15 @@ class OrchestratorEngine:
                     "preliminary_crs":     n_meta.get("preliminary_crs", None),
                     "paper_count":         n_meta.get("paper_count", None),
                     "rag_strategy":        n_meta.get("strategy", None),
+                    "tokens_in":           n_meta.get("tokens", {}).get("input", 0),
+                    "tokens_out":          n_meta.get("tokens", {}).get("output", 0),
                 })
 
         retry_events = []
         retries = 0
         max_retries = 2
 
-        while numeric_score < 7 and retries < max_retries:
+        while not is_linear and numeric_score < 7 and retries < max_retries:
             print(f"   [Global Diagnosis] Score {numeric_score}/10 is low. Diagnosing failure...")
             prev_score  = numeric_score
             prev_answer = final_answer
@@ -1124,6 +1282,18 @@ class OrchestratorEngine:
             "decomposer_latency_ms": decomposer_latency_ms,
             # ── Orchestrator token usage (aggregator + global retries) ────────────
             "orchestrator_tokens":   orchestrator_tokens,
+            # ── Agent token usage (per-node) and run-level totals ─────────────────
+            "total_tokens": {
+                "agents_input":  sum(n.get("tokens_in",  0) for n in dag_nodes_dump),
+                "agents_output": sum(n.get("tokens_out", 0) for n in dag_nodes_dump),
+                "orch_input":    orchestrator_tokens.get("input",  0),
+                "orch_output":   orchestrator_tokens.get("output", 0),
+                "grand_total":   (
+                    orchestrator_tokens.get("input",  0) +
+                    orchestrator_tokens.get("output", 0) +
+                    sum(n.get("tokens_in",  0) + n.get("tokens_out", 0) for n in dag_nodes_dump)
+                ),
+            },
             # ── Profiler ─────────────────────────────────────────────────────────
             "profiler_state":        user_profiler.profile.profile if config.Config.USE_PROFILER else {},
             # ── DAG plan ─────────────────────────────────────────────────────────

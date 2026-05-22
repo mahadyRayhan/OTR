@@ -1,0 +1,27 @@
+System Architecture: Orchestrator and Probing of Thought
+
+The system answers complex bioinformatics questions by splitting the work between two layers. The first layer — the Orchestrator — figures out what needs to be done and who should do it. The second layer — Probing of Thought (PoT) — figures out how well it is being done and intervenes when something goes wrong.
+
+Orchestrator
+
+When a question arrives, the Orchestrator runs four steps before any agent touches it.
+
+First, the Profiler classifies the intent of the question into one of three dimensions: conceptual (the user wants an explanation), procedural (the user wants working code or a deployment), or analytical (the user wants a comparison or evaluation). It maintains a running probability estimate across sessions — using either a Bayesian Dirichlet update or a lightweight Naive Bayes classifier — so the system adapts its response style to the user's actual pattern of questions over time.
+
+Second, the Decomposer breaks the question into a set of typed sub-tasks. Each sub-task is assigned to one of four specialist agents: rag for general biology knowledge and paper retrieval, code for Python scripts and pipelines, cloud for AWS infrastructure design, and scholar for finding real researchers and citations. The decomposer also identifies which sub-tasks depend on the output of others — for example, a code generation task might need the architecture facts from a rag task first.
+
+Third, the dependency structure is compiled into an initial directed acyclic graph (DAG): nodes are sub-tasks, edges are data dependencies. This gives the execution layer a concrete execution order — tasks with no dependencies can run immediately; downstream tasks wait for their inputs.
+
+Fourth, before handing the DAG to the execution layer, the Orchestrator applies context routing. When one agent's output must be passed to another, the raw text is often too long or off-topic. A compression module (CUGCR) filters the upstream output down to only the atoms of information the downstream agent actually needs, staying within a per-agent token budget.
+
+Probing of Thought (PoT)
+
+The PoT layer receives the initial DAG and executes it in waves — one wave per dependency level. After each agent in a wave produces its output, a fast LLM judge scores the result on a 0–1 scale and, if the score is low, identifies why using one of five failure categories: missing information, shallow reasoning, logical error, format error, or unknown.
+
+That failure category directly controls what happens next. If the answer is shallow, the node is expanded with a REFINE operation — the same agent re-runs with a self-critique prompt telling it exactly what was insufficient. If the answer is missing key information, a BRANCH operation spawns one or more parallel child nodes that each probe a different angle of the question. Once branches complete, an AGGREGATE node merges their results into a single improved answer. The DAG is therefore not fixed — it grows dynamically based on observed quality.
+
+To prevent runaway expansion, the PoT layer enforces two hard limits: a depth budget (no chain of expansions can go deeper than five levels) and a beam width (at most three nodes are expanded per wave, chosen by lowest score). This keeps the worst-case computation bounded at fifteen expansion steps regardless of question complexity.
+
+After the DAG reaches a terminal state — either all nodes pass the quality threshold, the depth budget is exhausted, or scores stop improving — the results are synthesised into a final answer. If that final answer still scores below 7/10 on a global evaluation, a separate self-healing loop identifies the single worst-performing agent, re-runs it with a corrective prompt that includes the successful peer outputs as context, and re-scores. This loop runs at most twice.
+
+Together, the Orchestrator handles planning and the PoT layer handles quality. The Orchestrator runs once per question; the PoT layer runs as many times as the quality gates require.

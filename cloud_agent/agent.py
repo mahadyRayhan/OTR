@@ -29,6 +29,30 @@ def _query_vector_db(query: str, n_results: int = 4) -> str:
         return retrieved_text
     except: return ""
 
+def _depth_reasoning_prefix(depth: int) -> str:
+    """Returns a reasoning instruction appended to the cloud prompt at depth > 1."""
+    if depth <= 1:
+        return ""
+    if depth == 2:
+        return (
+            "\n\nREASONING REQUIREMENT (depth=2): Before specifying the architecture, "
+            "write a brief reasoning block: (1) estimate compute/memory/storage requirements "
+            "for the workload, (2) identify the key cost and scalability trade-offs. "
+            "Then provide the complete infrastructure definition."
+        )
+    return (
+        "\n\nREASONING REQUIREMENT (depth=3): This is a high-priority node requiring rigorous output. "
+        "Structure your response as follows:\n"
+        "1. WORKLOAD ANALYSIS: Characterise the bioinformatics tool's resource profile "
+        "(CPU/GPU/memory-bound, I/O patterns, parallelism).\n"
+        "2. ARCHITECTURAL OPTIONS: Compare two viable approaches with cost, scalability, "
+        "and fault-tolerance trade-offs.\n"
+        "3. RECOMMENDATION: Justify your final choice.\n"
+        "4. IMPLEMENTATION: Complete, production-ready infrastructure definition with "
+        "security hardening (IAM least-privilege, encryption at rest, VPC isolation)."
+    )
+
+
 CLOUD_PROMPT = """
 You are an Expert Cloud Infrastructure Architect for Bioinformatics.
 Your task is to design a deployment architecture or write Infrastructure-as-Code for the following request:
@@ -62,22 +86,29 @@ the expected compute profile of the tool.
 4. PROFILE ALIGNMENT: Adapt your response style (code-heavy vs. explanation-heavy) based on the USER PROFILE.
 """
 
-async def call_cloud_agent(user_input: str, strategy: str = "cot", depth: int = 1, agent_registry: str = "", user_profile_str: str = "") -> str:
+async def call_cloud_agent(user_input: str, strategy: str = "cot", depth: int = 1, agent_registry: str = "", user_profile_str: str = "") -> tuple[str, dict]:
+    _zero = {"input": 0, "output": 0}
     model = _get_model()
-    if not model: return "[Cloud Agent - Mock] No API Key."
+    if not model: return "[Cloud Agent - Mock] No API Key.", _zero
 
     try:
         retrieved_context = _query_vector_db(user_input)
         
         prompt = CLOUD_PROMPT.format(
-            subtask=user_input, 
+            subtask=user_input,
             context=retrieved_context if retrieved_context else "No local cloud data found. Use best practices.",
             profile_guideline=user_profile_str if user_profile_str else "Balance cost and performance."
         )
-        
+        prompt += _depth_reasoning_prefix(depth)
+
         # Generate the infrastructure code
         response = await asyncio.to_thread(model.generate_content, prompt)
         output_text = response.text.strip()
+        _usage = getattr(response, "usage_metadata", None)
+        _agent_tokens = {
+            "input":  getattr(_usage, "prompt_token_count", 0) or 0,
+            "output": getattr(_usage, "candidates_token_count", 0) or 0,
+        }
         
         # 🚀 NEW: Save the generated Infrastructure code to disk
         output_dir = os.path.join(os.path.dirname(__file__), "generated_infrastructure")
@@ -108,7 +139,7 @@ async def call_cloud_agent(user_input: str, strategy: str = "cot", depth: int = 
         _infra_kw = ("resource", "aws_", "provider", "module", "terraform", "aws", "ec2", "s3")
         if "```" not in output_text and not any(kw in output_text.lower() for kw in _infra_kw):
             final_output = f"[STRUCTURAL_FAIL: no infrastructure definition detected]\n{final_output}"
-        return final_output
+        return final_output, _agent_tokens
 
     except Exception as e:
-        return f"[Cloud Agent Error] {e}"
+        return f"[Cloud Agent Error] {e}", {"input": 0, "output": 0}

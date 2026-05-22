@@ -37,10 +37,11 @@ _args, _ = _parser.parse_known_args()
 
 # ── Configuration ────────────────────────────────────────────────────────────
 ROOT_DIR = Path(os.path.dirname(__file__)).parent
+ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = Path(_args.out_dir) if _args.out_dir else ROOT_DIR / "raw_telemetry"
 OUTPUT_DIR.mkdir(exist_ok=True)
 ENGINE_TELEMETRY_FILE = ROOT_DIR / "experiment_telemetry.json"
-
+BEST_Q_PATH = ROOT / "best_questions.json"
 
 BENCHMARK_QUERIES = [
     # ══════════════════════════════════════════════════════════════════════════
@@ -162,6 +163,9 @@ BENCHMARK_QUERIES = [
     "Explain what the SAM optional tags NH (number of hits), HI (hit index), AS (alignment score), and NM (edit distance) encode, and how these are used for downstream filtering to retain only uniquely mapped primary alignments. Write a Python script using pysam that: (1) reads a STAR-aligned BAM file, (2) extracts NH, HI, AS, and NM tags per read, (3) computes the distribution of each tag across all alignments, (4) filters reads to retain only primary alignments (NH=1), and (5) exports filtered reads to a new BAM. Design an AWS Lambda function that performs this tag-based filtering on BAM files in S3.",
 ]
 
+# ── Load best queries ──────────────────────────────────────────────────────────
+def _load_best_queries() -> list[str]:
+    return [e["query"] for e in json.loads(BEST_Q_PATH.read_text())]
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 def read_engine_telemetry() -> dict:
@@ -202,7 +206,8 @@ async def run_ablation():
     engine = OrchestratorEngine()
 
     modes = [m.strip() for m in _args.modes.split(",") if m.strip()]
-    queries = BENCHMARK_QUERIES[:_args.queries] if _args.queries > 0 else BENCHMARK_QUERIES
+    # queries = BENCHMARK_QUERIES[:_args.queries] if _args.queries > 0 else BENCHMARK_QUERIES
+    queries = _load_best_queries()
     total_runs = len(queries) * len(modes)
     current_run = 0
 
@@ -277,10 +282,10 @@ if __name__ == "__main__":
         os.remove(ENGINE_TELEMETRY_FILE)
 
     # Validate modes
-    valid = {"none", "raw", "adaptive"}
+    valid = {"none", "raw", "adaptive", "react_cot_context", "react_cot_no_context"}
     bad = [m for m in _args.modes.split(",") if m.strip() not in valid]
     if bad:
-        print(f"Unknown mode(s): {bad}. Choose from: none, raw, adaptive")
+        print(f"Unknown mode(s): {bad}. Choose from: {', '.join(sorted(valid))}")
         sys.exit(1)
 
     asyncio.run(run_ablation())
