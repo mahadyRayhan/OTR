@@ -16,6 +16,18 @@ class Config:
     DAG_BUILDER = "got_dag"
 
     # ---------------------------------------------------------
+    # ACTIVE RESEARCH DOMAIN
+    # ---------------------------------------------------------
+    # Which domain's knowledge the agents should retrieve from.
+    # Options: "bioinformatics", "materials_science", "health_science"
+    # (see scholar_agent/domains.py for the registry).
+    #
+    # Currently a global switch. Per-query domain routing replaces this — the
+    # engine will resolve the domain once per question and set
+    # self._active_domain, which _execute_agent already prefers over this value.
+    ACTIVE_DOMAIN = "bioinformatics"
+
+    # ---------------------------------------------------------
     # AGENT SETTINGS
     # ---------------------------------------------------------
     USE_PROFILER = True

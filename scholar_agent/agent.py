@@ -15,6 +15,35 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
+from scholar_agent import domains as _domains
+from scholar_agent.domains import DEFAULT_DOMAIN
+
+# Minimum cosine similarity for a cached author to be accepted as an expert.
+# Without this floor, ChromaDB's nearest-neighbour search always returns its
+# top-k regardless of how unrelated they are — a materials-science query would
+# come back with confidently-scored bioinformatics researchers.
+#
+# Set below the lowest similarity observed across the bioinformatics benchmark
+# probes (0.197, on "Kallisto pseudoalignment") so the existing bio results are
+# preserved. The per-domain `where` filter is the primary defence against
+# cross-domain contamination; this floor is a secondary guard against weak
+# in-domain matches being presented as confident hits.
+CACHE_SIMILARITY_FLOOR = 0.15
+
+# Domains whose cached papers keep the original citation-only ordering.
+#
+# The bioinformatics cache was built by an earlier version of the builder that
+# stored at most ~20 papers per author (most have exactly 5). Re-ranking those
+# by topic overlap would change scholar output for already-published benchmark
+# runs, so that domain stays on legacy behaviour.
+#
+# Domains collected against the current API hold up to S2's 500-paper limit,
+# where ordering by citations surfaces an author's career-best work rather than
+# anything related to the question — so they get topical ranking.
+#
+# Drop a domain from this set to opt it into topical ranking.
+LEGACY_CITATION_RANKING_DOMAINS = frozenset({_domains.BIOINFORMATICS})
+
 # Per-call token accumulator — set in call_scholar_agent, read by internal LLM helpers
 _scholar_token_acc: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "_scholar_token_acc", default=None
@@ -171,7 +200,7 @@ def get_llm_model():
     # return genai.GenerativeModel('gemini-flash-latest')
     return genai.GenerativeModel('gemini-3.1-flash-lite-preview')
 
-async def extract_search_topic(query: str, model) -> str:
+async def extract_search_topic(query: str, model, domain: str = DEFAULT_DOMAIN) -> str:
     # Fallback regex when no LLM is available: strip only the known
     # meta-instruction prefixes, keep everything else.
     if not model:
@@ -189,15 +218,16 @@ async def extract_search_topic(query: str, model) -> str:
         ).strip().strip("'\"")
         return cleaned
  
+    hints = _domains.DOMAIN_SEARCH_HINTS.get(
+        _domains.normalize(domain),
+        _domains.DOMAIN_SEARCH_HINTS[DEFAULT_DOMAIN],
+    )
     prompt = (
         "Convert this input into a concise academic search query (3–8 words).\n\n"
+        f"The query is from the {_domains.label(domain)} research domain.\n\n"
         "KEEP — these are search signal:\n"
-        "  • Specific tool or software names        (e.g. 'Kallisto', 'STAR aligner')\n"
-        "  • Specific biological subtypes            (e.g. 'base editing', not just 'CRISPR';\n"
-        "                                              'adenine base editor', not just 'gene editor')\n"
-        "  • Named authors or papers                 (e.g. 'Bray et al 2016', 'Pachter')\n"
-        "  • Domain-narrowing modifiers that narrow the RESEARCH FIELD\n"
-        "    (e.g. 'off-target effects', 'pseudoalignment', 'RNA-seq quantification')\n\n"
+        f"{hints['keep']}\n"
+        "  • Named authors or papers                 (e.g. 'Bray et al 2016', 'Pachter')\n\n"
         "REMOVE — these are meta-instructions, not search terms:\n"
         "  • Task verbs: 'find experts', 'retrieve papers', 'write a script',\n"
         "                'explain', 'list', 'design', 'identify', 'extract', 'retrieve'\n"
@@ -208,9 +238,7 @@ async def extract_search_topic(query: str, model) -> str:
         "    Pattern: 'retrieve/extract/get [NOUN] from [source]' → [NOUN] is a task instruction, not a domain.\n"
         "    Strip [NOUN], keep the named source/tool.\n"
         "    Examples:\n"
-        "      'retrieve parameter values from the Kallisto paper'  → 'Kallisto RNA-seq pseudoalignment'\n"
-        "      'extract exact values from BWA documentation'        → 'BWA short read alignment'\n"
-        "      'get detection methods from the CRISPR article'      → 'CRISPR base editing'\n\n"
+        f"{hints['examples']}\n\n"
         "Output ONLY the search query — no punctuation, no quotes, no explanation.\n\n"
         f"Input: '{query}'\n"
         "Search query:"
@@ -317,6 +345,8 @@ class ScholarCacheProvider:
         self.db_path    = _AGENT_DIR / "scholar_cache.db"
         self.chroma_path = _AGENT_DIR / "scholar_chroma_db"
         self._chroma_col = None
+        self._chroma_space = "cosine"
+        self._chroma_domain_ready: Optional[bool] = None
 
     def _get_chroma_col(self):
         if self._chroma_col is not None:
@@ -331,12 +361,60 @@ class ScholarCacheProvider:
             self._chroma_col = client.get_collection(
                 "scholar_cache_vault", embedding_function=ef
             )
+            meta = self._chroma_col.metadata or {}
+            self._chroma_space = meta.get("hnsw:space", "l2")
         except Exception as exc:
             print(f"   [Cache] ChromaDB unavailable: {exc}")
             self._chroma_col = None
         return self._chroma_col
 
-    def _papers_for_author(self, con: sqlite3.Connection, author_id: str) -> List[Paper]:
+    def _has_domain_flags(self, col) -> bool:
+        """
+        True once the vector cache has been rebuilt with per-domain metadata.
+
+        A pre-migration collection carries no `dom_*` keys, so a domain filter
+        would silently match nothing. Rather than fall back to an unfiltered
+        search — which is exactly the cross-domain contamination this filter
+        exists to prevent — we disable the vector cache and let SQLite plus the
+        live API answer instead.
+        """
+        if self._chroma_domain_ready is not None:
+            return self._chroma_domain_ready
+        try:
+            sample = col.get(limit=1, include=["metadatas"])
+            metas = sample.get("metadatas") or []
+            ready = bool(metas) and any(
+                k.startswith("dom_") for k in (metas[0] or {})
+            )
+        except Exception:
+            ready = False
+        if not ready:
+            print("   [Cache] Vector cache has no domain metadata — skipping it. "
+                  "Run: python scholar_agent/build_scholar_cache.py --rebuild-chroma")
+        self._chroma_domain_ready = ready
+        return ready
+
+    def _to_similarity(self, distance: float) -> float:
+        """Convert a ChromaDB distance to cosine similarity in [0, 1]."""
+        if self._chroma_space == "cosine":
+            sim = 1.0 - float(distance)
+        elif self._chroma_space == "ip":
+            sim = float(distance)
+        else:  # (squared) L2 over normalised embeddings: d^2 = 2 - 2cos
+            sim = 1.0 - (float(distance) / 2.0)
+        return max(0.0, min(1.0, sim))
+
+    def _papers_for_author(self, con: sqlite3.Connection, author_id: str,
+                           topic: str = "", domain: str = DEFAULT_DOMAIN) -> List[Paper]:
+        """
+        Return this author's 5 most relevant papers for `topic`.
+
+        Ranking by citations alone was adequate when every author had only ~5
+        cached papers. Domains collected against the current API store up to
+        500 per author, where "most cited" surfaces an author's career-best
+        work rather than anything to do with the question asked. Rank by topic
+        overlap first, then use citations to break ties.
+        """
         rows = con.execute(
             """SELECT p.paper_id, p.title, p.abstract, p.year,
                       p.citation_count, p.fields
@@ -344,9 +422,19 @@ class ScholarCacheProvider:
                JOIN papers p ON p.paper_id = ap.paper_id
                WHERE ap.author_id = ?
                ORDER BY p.citation_count DESC
-               LIMIT 5""",
+               LIMIT 200""",
             (author_id,),
         ).fetchall()
+
+        keywords = _domains.keywords_of(topic)
+        legacy = _domains.normalize(domain) in LEGACY_CITATION_RANKING_DOMAINS
+        if keywords and len(rows) > 5 and not legacy:
+            rows = sorted(
+                rows,
+                key=lambda r: _domains.topic_relevance(r[1], r[2], keywords, r[4]),
+                reverse=True,
+            )
+        rows = rows[:5]
         papers = []
         for r in rows:
             fos = json.loads(r[5] or "[]") if r[5] else []
@@ -357,9 +445,11 @@ class ScholarCacheProvider:
             ))
         return papers
 
-    def query_sqlite(self, topic: str, limit: int, exclude_ids: set) -> List[ExpertResult]:
+    def query_sqlite(self, topic: str, limit: int, exclude_ids: set,
+                     domain: str = DEFAULT_DOMAIN) -> List[ExpertResult]:
         if not self.db_path.exists():
             return []
+        domain = _domains.normalize(domain)
         try:
             con = sqlite3.connect(self.db_path)
             keywords = [w for w in topic.lower().split() if len(w) > 4][:5]
@@ -367,15 +457,18 @@ class ScholarCacheProvider:
                 con.close()
                 return []
 
-            # Match authors whose cached topics contain any of the keywords
+            # Match authors whose cached topics contain any of the keywords,
+            # restricted to topics belonging to the active domain.
             placeholders = " OR ".join(["LOWER(ta.topic) LIKE ?" for _ in keywords])
-            params = [f"%{kw}%" for kw in keywords] + [limit * 4]
+            params = [f"%{kw}%" for kw in keywords] + [domain, limit * 4]
             rows = con.execute(
                 f"""SELECT a.author_id, a.name, a.citation_count, a.paper_count,
                            SUM(ta.relevance) AS total_rel
                     FROM topic_authors ta
                     JOIN authors a ON a.author_id = ta.author_id
+                    JOIN search_topics st ON st.topic = ta.topic
                     WHERE ({placeholders})
+                      AND st.domain = ?
                       AND a.citation_count > 0
                     GROUP BY a.author_id
                     ORDER BY total_rel DESC, a.citation_count DESC
@@ -387,17 +480,18 @@ class ScholarCacheProvider:
             for aid, name, cites, paper_count, relevance in rows:
                 if aid in exclude_ids or len(results) >= limit:
                     continue
-                papers = self._papers_for_author(con, aid)
+                papers = self._papers_for_author(con, aid, topic, domain)
                 kws = list({f for p in papers for f in p.fields_of_study})[:4]
                 if not kws:
                     # Fall back to associated topic strings for meaningful expertise labels
                     topic_rows = con.execute(
                         """SELECT ta.topic FROM topic_authors ta
-                           WHERE ta.author_id = ?
+                           JOIN search_topics st ON st.topic = ta.topic
+                           WHERE ta.author_id = ? AND st.domain = ?
                            ORDER BY ta.relevance DESC LIMIT 4""",
-                        (aid,),
+                        (aid, domain),
                     ).fetchall()
-                    kws = [r[0] for r in topic_rows] or ["bioinformatics"]
+                    kws = [r[0] for r in topic_rows] or [_domains.label(domain)]
                 score = min(math.log1p(relevance or 0) / 20.0, 1.0)
                 results.append(ExpertResult(
                     author=Author(
@@ -415,22 +509,41 @@ class ScholarCacheProvider:
             print(f"   [Cache] SQLite query failed: {exc}")
             return []
 
-    def query_chroma(self, topic: str, limit: int, exclude_ids: set) -> List[ExpertResult]:
+    def query_chroma(self, topic: str, limit: int, exclude_ids: set,
+                     domain: str = DEFAULT_DOMAIN) -> List[ExpertResult]:
         col = self._get_chroma_col()
         if col is None:
             return []
+        if not self._has_domain_flags(col):
+            return []
+        domain = _domains.normalize(domain)
         try:
-            n_ask = min(limit * 3, col.count())
+            # Extra headroom: the similarity floor below discards weak hits, so
+            # a limit*3 window could come back short after filtering.
+            n_ask = min(max(limit * 5, 10), col.count())
             if n_ask == 0:
                 return []
-            result = col.query(query_texts=[topic], n_results=n_ask)
+            result = col.query(
+                query_texts=[topic],
+                n_results=n_ask,
+                where={_domains.flag_key(domain): True},
+                include=["metadatas", "distances"],
+            )
             metas = result.get("metadatas", [[]])[0]
+            dists = (result.get("distances") or [[]])[0]
             results: List[ExpertResult] = []
-            for meta in metas:
+            dropped = 0
+            for i, meta in enumerate(metas):
                 if len(results) >= limit:
                     break
                 aid = meta.get("author_id", "")
                 if aid in exclude_ids:
+                    continue
+                # Reject weak nearest-neighbour matches rather than presenting
+                # them as confident hits.
+                sim = self._to_similarity(dists[i]) if i < len(dists) else 0.0
+                if sim < CACHE_SIMILARITY_FLOOR:
+                    dropped += 1
                     continue
                 name        = meta.get("name", "Unknown")
                 cites       = meta.get("citation_count", 0)
@@ -439,7 +552,7 @@ class ScholarCacheProvider:
                 topic_str   = meta.get("topics", "") or ""
                 kws = [t.strip() for t in topic_str.split(";") if t.strip()][:4]
                 if not kws:
-                    kws = ["bioinformatics"]
+                    kws = [_domains.label(domain)]
                 results.append(ExpertResult(
                     author=Author(
                         id=aid, name=name,
@@ -447,10 +560,13 @@ class ScholarCacheProvider:
                         citation_count=cites,
                         affiliations=[affil_str] if affil_str else None,
                     ),
-                    relevance_score=0.5,
+                    relevance_score=round(sim, 4),
                     matched_papers=[],
                     expertise_areas=kws,
                 ))
+            if dropped:
+                print(f"   [Cache] Dropped {dropped} vector hit(s) below "
+                      f"similarity floor {CACHE_SIMILARITY_FLOOR}.")
 
             # Enrich with paper data from SQLite cache
             if results and self.db_path.exists():
@@ -468,15 +584,16 @@ class ScholarCacheProvider:
             print(f"   [Cache] ChromaDB query failed: {exc}")
             return []
 
-    def query(self, topic: str, limit: int, exclude_ids: set) -> List[ExpertResult]:
+    def query(self, topic: str, limit: int, exclude_ids: set,
+              domain: str = DEFAULT_DOMAIN) -> List[ExpertResult]:
         if limit <= 0:
             return []
         # ChromaDB first — semantic similarity gives better topical relevance
-        results = self.query_chroma(topic, limit, exclude_ids)
+        results = self.query_chroma(topic, limit, exclude_ids, domain)
         remaining = limit - len(results)
         if remaining > 0:
             filled_ids = exclude_ids | {r.author.id for r in results}
-            sql_results = self.query_sqlite(topic, remaining, filled_ids)
+            sql_results = self.query_sqlite(topic, remaining, filled_ids, domain)
             results.extend(sql_results)
         return results
 
@@ -514,16 +631,19 @@ class ScholarAgent:
                 queries.append(candidate)
         return queries[:3]  # cap at 3 passes — each failed API call waits for HTTP timeout
 
-    async def find_experts_by_topic(self, topic: str, limit: int = 5) -> List[ExpertResult]:
+    async def find_experts_by_topic(self, topic: str, limit: int = 5,
+                                    domain: str = DEFAULT_DOMAIN) -> List[ExpertResult]:
         diverse_results: List[ExpertResult] = []
         seen_top_paper_ids: set = set()
         seen_author_ids: set = set()
         self.cache_used = False
+        domain = _domains.normalize(domain)
 
-        # ── STEP 1: Query local cache first ───────────────────────────────────
-        cache_results = self._cache.query(topic, limit, set())
+        # ── STEP 1: Query local cache first (restricted to the active domain) ──
+        cache_results = self._cache.query(topic, limit, set(), domain)
         if cache_results:
-            print(f"   [Cache] Found {len(cache_results)}/{limit} from local DB.")
+            print(f"   [Cache] Found {len(cache_results)}/{limit} from local DB "
+                  f"[domain={domain}].")
             for r in cache_results:
                 aid = r.author.id if r.author.id != "no-id" else r.author.name.lower().strip()
                 if aid not in seen_author_ids:
@@ -629,11 +749,14 @@ class ScholarAgent:
         return diverse_results
 
     async def find_collaborators(
-        self, researcher_name: str, topic: str, limit: int = 5
+        self, researcher_name: str, topic: str, limit: int = 5,
+        domain: str = DEFAULT_DOMAIN
     ) -> Dict[str, Any]:
         candidates = await self.provider.search_authors(researcher_name)
         if not candidates:
-            fallback_experts = await self.find_experts_by_topic(topic, limit=limit)
+            fallback_experts = await self.find_experts_by_topic(
+                topic, limit=limit, domain=domain
+            )
             return {
                 "status": "fallback",
                 "message": (
@@ -642,7 +765,7 @@ class ScholarAgent:
                 ),
                 "experts": fallback_experts,
             }
-        experts = await self.find_experts_by_topic(topic, limit=limit)
+        experts = await self.find_experts_by_topic(topic, limit=limit, domain=domain)
         return {
             "status": "success",
             "message": f"Found diverse experts in '{topic}'.",
@@ -679,9 +802,11 @@ async def call_scholar_agent(
     strategy: str = "cot",
     depth: int = 1,
     agent_registry: str = "",
+    domain: str = DEFAULT_DOMAIN,
 ) -> tuple[str, dict]:
     _acc = {"input": 0, "output": 0}
     _tok = _scholar_token_acc.set(_acc)
+    domain = _domains.normalize(domain)
 
     # depth > 1: raise internal quality bar (harder judge threshold → more self-correction)
     # depth >= 3: also broaden expert search by +1 to increase coverage
@@ -690,19 +815,24 @@ async def call_scholar_agent(
         limit = limit + 1
 
     llm = get_llm_model()
-    clean_topic = await extract_search_topic(user_input, llm)
-    print(f"   [System] Cleaned query for API: '{clean_topic}' | Requesting {limit} expert(s)")
+    clean_topic = await extract_search_topic(user_input, llm, domain)
+    print(f"   [System] Cleaned query for API: '{clean_topic}' | "
+          f"Requesting {limit} expert(s) | domain={domain}")
 
     # -------------------------------------------------------
     # STEP 1: First search pass
     # -------------------------------------------------------
     if is_collaboration:
-        res = await agent_instance.find_collaborators(user_name, clean_topic, limit=limit)
+        res = await agent_instance.find_collaborators(
+            user_name, clean_topic, limit=limit, domain=domain
+        )
         experts_list: List[ExpertResult] = res["experts"]
         mode_label = "Collaborator Mode"
         status_msg = res["message"]
     else:
-        experts_list = await agent_instance.find_experts_by_topic(clean_topic, limit=limit)
+        experts_list = await agent_instance.find_experts_by_topic(
+            clean_topic, limit=limit, domain=domain
+        )
         mode_label = "Expert Search Mode"
         status_msg = ""
 
@@ -770,7 +900,7 @@ async def call_scholar_agent(
             f"(depth={depth}). Retrying with suggested query: '{retry_topic}'"
         )
         retry_experts = await agent_instance.find_experts_by_topic(
-            retry_topic, limit=limit
+            retry_topic, limit=limit, domain=domain
         )
         if len(retry_experts) > len(experts_list):
             experts_list = retry_experts

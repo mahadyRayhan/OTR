@@ -465,7 +465,11 @@ class OrchestratorEngine:
         _depth_override = config.Config.DEFAULT_DEPTH
         if _depth_override is not None:
             depth = _depth_override
-        meta: dict = {"agent": agent_name, "strategy": strategy, "depth": depth}
+        # Per-query routing (Phase 2) sets self._active_domain; until then the
+        # global config value applies.
+        active_domain = getattr(self, "_active_domain", None) or config.Config.ACTIVE_DOMAIN
+        meta: dict = {"agent": agent_name, "strategy": strategy, "depth": depth,
+                      "domain": active_domain}
 
         # Append profile-driven depth instruction to every non-scholar agent.
         # Scholar is API-driven; instruction text would be ignored.
@@ -497,7 +501,7 @@ class OrchestratorEngine:
                     query_normalized = re.sub(rf'\b{word}\b', digit, query_normalized)
                 match = re.search(r'\b([1-5])\b', query_normalized)
                 if match: limit = int(match.group(1))
-                result, agent_tokens = await call_scholar_agent(clean_query, False, "Unknown", limit, strategy, depth, agent_registry)
+                result, agent_tokens = await call_scholar_agent(clean_query, False, "Unknown", limit, strategy, depth, agent_registry, active_domain)
                 meta["tokens"] = agent_tokens
                 return result, meta
             else:
