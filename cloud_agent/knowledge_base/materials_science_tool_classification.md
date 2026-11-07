@@ -1,5 +1,7 @@
 # Tool Classification Reference: Computational Materials Science
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Plane-Wave DFT Codes (VASP, Quantum ESPRESSO, ABINIT, CASTEP, GPAW)
 - **Tools:** VASP, Quantum ESPRESSO (PWscf), ABINIT, CASTEP, GPAW, Elk, Exciting.
 - **Compute Profile:** CPU-bound, tightly coupled MPI. Dominated by 3D FFTs and iterative diagonalisation, both communication-heavy.

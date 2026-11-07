@@ -25,6 +25,7 @@ from typing import Any
 
 from rag_agent.knowledge_base import KnowledgeBase, Paper
 from rag_agent.rag_config import settings
+from orchestrator.context_format import without_request
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -270,7 +271,8 @@ async def call_rag_agent(
     logger.warning("-------------------------------------------------------------")
     logger.warning("user_input : '%s'", user_input)
     logger.warning("-------------------------------------------------------------")
-    papers = await kb.search_publications(user_input, complexity=complexity)
+    # The appended user request is reference material for the answer, not part of the search.
+    papers = await kb.search_publications(without_request(user_input), complexity=complexity)
  
     # if not papers:
     #     logger.warning("RAG agent: no papers retrieved for '%s'", user_input)

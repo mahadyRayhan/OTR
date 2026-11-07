@@ -274,7 +274,8 @@ class GeminiProvider(LLMProvider):
             from .rag_config import settings
             api_key = settings.gemini_api_key
 
-        client = genai.Client(api_key=api_key)
+        import gemini_client
+        client = gemini_client.client() if gemini_client.use_vertex() else genai.Client(api_key=api_key)
         t0 = time.perf_counter()
 
         # Convert messages to Gemini format
@@ -288,7 +289,7 @@ class GeminiProvider(LLMProvider):
             max_output_tokens=max_tokens,
             temperature=temperature,
         )
-        model_name = self.model.replace("models/", "")
+        model_name = gemini_client.resolve(self.model)
         response = await client.aio.models.generate_content(
             model=model_name,
             contents=contents,
@@ -472,9 +473,10 @@ def list_providers() -> dict[str, dict[str, Any]]:
 
 def _parse_json(text: str) -> dict[str, Any]:
     """Strip markdown fences and parse JSON from LLM output."""
+    import gemini_client
     clean = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE).strip()
     try:
-        return json.loads(clean)
+        return gemini_client.parse_json(clean)  # tolerates text after the JSON
     except json.JSONDecodeError as exc:
         logger.warning("JSON parse failed: %s — raw: %s", exc, clean[:120])
         return {}

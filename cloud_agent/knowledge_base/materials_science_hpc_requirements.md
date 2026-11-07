@@ -1,5 +1,7 @@
 # HPC Hardware Guidelines: Computational Materials Science
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Plane-Wave DFT (VASP, Vienna Ab initio Simulation Package)
 - **Compute Profile:** CPU-bound and tightly coupled. 3D FFTs are central to VASP's speed; poor MPI rank placement across nodes "deteriorates the performance". Communication-bound, not embarrassingly parallel.
 - **Parallelization:** Hybrid MPI + OpenMP. `NCORE` controls FFT parallelization, `KPAR` splits k-point groups. Note: "running on multiple OpenMP threads and/or GPUs switches off the NCORE parallelization" — CPU and GPU builds tune differently.

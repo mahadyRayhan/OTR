@@ -9,7 +9,7 @@ import sqlite3
 import ssl
 import urllib.request
 import urllib.parse
-import google.generativeai as genai
+import gemini_client as genai
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +17,7 @@ from typing import Optional, List, Dict, Any
 
 from scholar_agent import domains as _domains
 from scholar_agent.domains import DEFAULT_DOMAIN
+from scholar_agent.intent import is_paper_lookup
 
 # Minimum cosine similarity for a cached author to be accepted as an expert.
 # Without this floor, ChromaDB's nearest-neighbour search always returns its
@@ -80,6 +81,8 @@ class Paper:
     authors: List[AuthorBrief]
     publication_types: List[str]
     fields_of_study: List[str]
+    doi: str = ""
+    venue: str = ""
 
 @dataclass
 class Author:
@@ -156,7 +159,7 @@ class RealSemanticScholarProvider:
         url = (
             f"https://api.semanticscholar.org/graph/v1/paper/search"
             f"?query={safe_query}&limit={limit}"
-            f"&fields=title,abstract,year,citationCount,authors,publicationTypes,s2FieldsOfStudy"
+            f"&fields=title,abstract,year,citationCount,authors,publicationTypes,s2FieldsOfStudy,externalIds,venue"
         )
         data = await self._fetch(url)
         papers = []
@@ -177,6 +180,8 @@ class RealSemanticScholarProvider:
                 authors=authors,
                 publication_types=pub_types,
                 fields_of_study=fos,
+                doi=(item.get("externalIds") or {}).get("DOI") or "",
+                venue=item.get("venue") or "",
             ))
         return papers
 
@@ -794,6 +799,102 @@ agent_instance = ScholarAgent()
 SHORTFALL_MARKER = "[SHORTFALL requested={requested} found={found}]"
 JUDGE_SCORE_THRESHOLD = 7  # re-query internally if judge scores below this
 
+# ---------------------------------------------------------
+# PAPER MODE: which paper is this request about, and what is its DOI?
+# ---------------------------------------------------------
+async def _llm_text(model, prompt: str) -> str:
+    res = await asyncio.to_thread(model.generate_content, prompt)
+    _scholar_add_tokens(res)
+    return res.text or ""
+
+
+def _europepmc_search(query: str, limit: int = 10) -> List[Paper]:
+    """Europe PMC REST search (life sciences, includes preprints). Title matches first, then a full-text
+    search sorted by citations, since papers that merely use a tool outnumber the one introducing it."""
+    papers, seen = [], set()
+    for q, sort in ((f"TITLE:({query})", ""), (query, "&sort=CITED%20desc")):
+        url = ("https://www.ebi.ac.uk/europepmc/webservices/rest/search?format=json&resultType=core"
+               f"&pageSize={limit}{sort}&query={urllib.parse.quote(q)}")
+        try:
+            with urllib.request.urlopen(url, timeout=20, context=_SSL_CTX) as r:
+                hits = json.load(r).get("resultList", {}).get("result", [])
+        except Exception:
+            hits = []
+        for h in hits:
+            key = h.get("doi") or h.get("id")
+            if key in seen:
+                continue
+            seen.add(key)
+            papers.append(Paper(id="EPMC:" + str(key), title=re.sub(r"<[^>]+>", "", h.get("title") or ""),
+                                abstract=h.get("abstractText") or "", year=int(h.get("pubYear") or 0),
+                                citation_count=int(h.get("citedByCount") or 0), authors=[], publication_types=[],
+                                fields_of_study=[], doi=h.get("doi") or "", venue=h.get("journalTitle") or ""))
+        if len(papers) >= limit:
+            break
+    return papers[:limit]
+
+
+def _quoted_phrases(text: str, words: int = 10) -> List[str]:
+    """Spans of `words` consecutive words from passages quoted in the request (>= 8 words), for an
+    exact-phrase full-text search: the most reliable way to find the paper a sentence comes from."""
+    spans = []
+    for q in re.findall(r"[\"“'‘]([^\"”’]{40,}?)[\"”’']", text or ""):
+        toks = re.sub(r"[^\w\s-]", " ", q).split()
+        if len(toks) >= 8:
+            spans += [" ".join(toks[:words]), " ".join(toks[-words:])]
+    return list(dict.fromkeys(spans))[:2]
+
+
+async def find_paper(user_input: str, llm, depth: int = 1) -> str:
+    """Search Semantic Scholar with LLM-written title-style queries, then let the LLM pick the matching
+    paper from the candidates. DOIs in the answer come only from the candidate list."""
+    try:
+        queries = genai.parse_json(await _llm_text(llm, (
+            "Write up to 3 short literature search queries that would find the paper this request is about. "
+            "The first query is the tool, method or dataset name alone, exactly as written (if the request names "
+            "one); the others are 2 to 5 distinctive keywords. Do not guess the paper's title. "
+            'Return only JSON: {"queries": ["...", "..."]}\n\n'
+            f"Request: {user_input}")))["queries"][: 2 + depth]
+    except Exception:
+        queries = [user_input[:200]]
+    seen, candidates = set(), []
+    for phrase in _quoted_phrases(user_input):  # exact-phrase hits first: they contain the quoted text
+        for p in await asyncio.to_thread(_europepmc_search, f'"{phrase}"', 5):
+            key = (p.doi or p.id or p.title).lower()
+            if key and key not in seen:
+                seen.add(key)
+                p.abstract = f"[contains the quoted text] {p.abstract}"
+                candidates.append(p)
+    for q in queries:  # Semantic Scholar and Europe PMC; the same paper from both is kept once (by DOI)
+        try:
+            found = await agent_instance.provider.search_papers(str(q), limit=10)
+        except Exception:
+            found = []
+        found += await asyncio.to_thread(_europepmc_search, str(q), 10)
+        for p in found:
+            key = (p.doi or p.id or p.title).lower()
+            if key and key not in seen:
+                seen.add(key)
+                candidates.append(p)
+    print(f"   [Paper mode] queries={queries} | {len(candidates)} candidates")
+    if not candidates:
+        return "[STRUCTURAL_FAIL: 0 papers retrieved]\n[Scholar Agent - Paper Search] No candidate papers found."
+    listing = "\n".join(
+        f"[{i + 1}] {p.title} ({p.year}; {p.venue or 'venue n/a'}) DOI: {p.doi or 'none'} | "
+        f"{(p.abstract or '')[:1500]}" for i, p in enumerate(candidates[:25]))  # tools are often named late in the abstract
+    answer = await _llm_text(llm, (
+        "Pick the paper from the candidates below that the request is about. Use only titles and DOIs that "
+        "appear in the list; never invent a DOI. If several candidates fit (e.g. a tool with several versions), "
+        "give the original paper first. A candidate marked [contains the quoted text] was found by an exact "
+        "full-text search for the passage quoted in the request, so it contains that passage even when its "
+        "abstract does not; prefer it. A tool's paper often does not name the tool in its title; check the "
+        "abstract for the tool's name or method. If none fits, say that no candidate matches.\n"
+        "Reply with: the title, year, venue and DOI of the chosen paper, then one sentence on why it matches.\n\n"
+        f"Request: {user_input}\n\nCandidates:\n{listing}"))
+    return (f"[Scholar Agent - Paper Search]\n{answer.strip()}\n\n   Candidates considered:\n"
+            + "\n".join(f"   - {p.title} ({p.year}) DOI: {p.doi or 'none'}" for p in candidates[:8]))
+
+
 async def call_scholar_agent(
     user_input: str,
     is_collaboration: bool = False,
@@ -815,6 +916,11 @@ async def call_scholar_agent(
         limit = limit + 1
 
     llm = get_llm_model()
+    if llm and is_paper_lookup(user_input):
+        result = await find_paper(user_input, llm, depth)
+        _scholar_token_acc.reset(_tok)
+        return result, _acc
+
     clean_topic = await extract_search_topic(user_input, llm, domain)
     print(f"   [System] Cleaned query for API: '{clean_topic}' | "
           f"Requesting {limit} expert(s) | domain={domain}")

@@ -1,5 +1,7 @@
 # HPC Hardware Guidelines: AI-Driven Structural Biology
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Protein Structure Prediction (AlphaFold 3)
 - **Compute Profile:** Heavily GPU-bound. AlphaFold relies on massive deep learning transformers (Evoformer) to predict 3D structures from amino acid sequences.
 - **Hardware Recommendation:** AWS P-Family or G-Family (`p4d.24xlarge` or `g5.2xlarge`).

@@ -1,5 +1,7 @@
 # Compliance Baseline for Health Science Workloads on AWS
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Scope and Limitations of This Guidance
 - **What This Is:** Architectural guidance for building health-research infrastructure on AWS. It describes technical controls and which AWS services are contractually permitted to hold PHI.
 - **What This Is NOT:** Legal advice, a compliance certification, or a substitute for review by your institution's IRB, privacy office, or legal counsel. HIPAA compliance is a property of an organisation and its processes, not of an architecture diagram.

@@ -142,3 +142,10 @@ cloud_agent/generated_infrastructure
 xtra
 *.pyc
 *.png
+# Google Cloud service-account keys
+new-SDK-key/
+journal_fixes/data/
+journal_fixeslogs/
+cloude_agent/knowledge_base/
+code_agent/knowledge_base/
+rag_agent/knowledge_base/

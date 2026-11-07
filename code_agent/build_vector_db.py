@@ -59,11 +59,14 @@ for filename in sorted(os.listdir(KB_DIR)):
     elif filename.endswith(".pdf"):
         full_text = ""
         try:
-            try:
-                import pymupdf4llm
-                full_text = pymupdf4llm.to_markdown(filepath)
-            except ImportError:
-                pass
+            # RAG_PDF_EXTRACTOR=fitz skips pymupdf4llm, whose Tesseract OCR pass
+            # can crash the process on some PDFs.
+            if os.environ.get("RAG_PDF_EXTRACTOR", "").lower() != "fitz":
+                try:
+                    import pymupdf4llm
+                    full_text = pymupdf4llm.to_markdown(filepath)
+                except ImportError:
+                    pass
             if not full_text:
                 try:
                     import fitz
@@ -105,7 +108,9 @@ for filename in sorted(os.listdir(KB_DIR)):
 
 # 5. Insert into Database
 if docs:
-    collection.add(documents=docs, metadatas=metadatas, ids=ids)
+    # Chroma caps the number of records per add() call, so insert in batches.
+    for start in range(0, len(docs), 1000):
+        collection.add(documents=docs[start:start + 1000], metadatas=metadatas[start:start + 1000], ids=ids[start:start + 1000])
     print(f"\n✅ Successfully ingested {len(docs)} total chunks into Vector DB!")
 else:
     print("❌ No .ipynb or .pdf files found in the knowledge_base folder.")

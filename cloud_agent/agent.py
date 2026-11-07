@@ -1,11 +1,16 @@
 import os
 import asyncio
+import csv
+import re
 import chromadb
-import google.generativeai as genai
+import gemini_client as genai
+from orchestrator.context_format import entities, task_text
 
 # GEMINI_MODEL = "gemini-flash-latest"
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
-DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
+# SCIWEAVER_INDEX_DIR selects an alternative index set (e.g. a benchmark-aligned corpus).
+DB_DIR = (os.path.join(os.environ["SCIWEAVER_INDEX_DIR"], "cloud") if os.environ.get("SCIWEAVER_INDEX_DIR")
+          else os.path.join(os.path.dirname(__file__), "chroma_db"))
 
 def _get_model():
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -28,6 +33,63 @@ def _query_vector_db(query: str, n_results: int = 4) -> str:
             retrieved_text += f"\n--- Source: {source} ---\n{doc}\n"
         return retrieved_text
     except: return ""
+
+# AWS on-demand prices (us-east-1), from journal_fixes/scripts/collect_aws_catalog.py.
+CATALOG_CSV = os.path.join(os.path.dirname(__file__), "aws_ec2_us-east-1.csv")
+INSTANCE_PLACEHOLDER = "<INSTANCE>"
+# Accelerator families. The catalog's gpu column is empty for some (FPGA f, Gaudi dl) and set for
+# others (Inferentia inf), so families decide: GPU ones (p, g, gr) and non-GPU ones (inf, trn, dl, f, vt).
+GPU_FAMILY = re.compile(r"^(?:p\d|g\d|gr\d)")
+NON_GPU_ACCELERATOR_FAMILY = re.compile(r"^(?:inf\d|trn\d|dl\d|f\d|vt\d)")
+_CATALOG = None
+
+
+def _catalog() -> list[dict]:
+    global _CATALOG
+    if _CATALOG is None:
+        _CATALOG = []
+        for r in csv.DictReader(open(CATALOG_CSV)):
+            try:
+                _CATALOG.append({"instance": r["instance"], "family": r["family"], "vcpu": int(r["vcpu"]),
+                                 "mem": float(r["memory"].split()[0].replace(",", "")), "gpu": bool(r["gpu"]),
+                                 "arm": "Graviton" in r["processor"], "current": r["current_gen"] == "Yes",
+                                 "usd": float(r["usd_per_hour"])})
+            except ValueError:
+                continue
+    return _CATALOG
+
+
+def _fitting_instances(cpus: float, mem: float, request: str, k: int = 3) -> list[dict]:
+    """Cheapest current-generation instances with at least cpus vCPUs and mem GiB. Burstable t-family
+    instances cannot sustain batch jobs and are skipped; GPU and Arm (Graviton) instances only when
+    the request asks for them, since most bioinformatics binaries are x86 builds."""
+    want_gpu = bool(re.search(r"\b(?:gpus?|cuda)\b", request, re.I)) and not re.search(
+        r"\b(?:no|non|without|not)[\s-]+(?:a\s+)?gpus?\b", request, re.I)
+    want_arm = bool(re.search(r"\b(arm|graviton)\b", request, re.I))
+    ok = [r for r in _catalog() if r["current"] and not r["family"].startswith("t")
+          and not NON_GPU_ACCELERATOR_FAMILY.match(r["family"])
+          and bool(GPU_FAMILY.match(r["family"])) == want_gpu
+          and r["arm"] == want_arm and r["vcpu"] >= cpus and r["mem"] >= mem]
+    return sorted(ok, key=lambda r: r["usd"])[:k]
+
+
+def _attach_instance(output_text: str, request: str) -> str:
+    """Pick the instance from the price catalog for the SIZING line, so the instance always fits the estimate."""
+    m = re.search(r"SIZING:\s*cpus\s*=\s*(\d+(?:\.\d+)?)\s*,?\s*memory_gb\s*=\s*(\d+(?:\.\d+)?)", output_text, re.I)
+    if not m:
+        return output_text.replace(INSTANCE_PLACEHOLDER, "(instance not selected: no SIZING line)")
+    cpus, mem = float(m.group(1)), float(m.group(2))
+    fits = _fitting_instances(cpus, mem, request)
+    if not fits:
+        return output_text.replace(INSTANCE_PLACEHOLDER, "(no catalog instance fits)") + (
+            f"\n\nCATALOG CHECK: no current-generation instance has {cpus:g} vCPUs and {mem:g} GiB.")
+    best = fits[0]
+    others = ", ".join(f"{r['instance']} (${r['usd']:.4f}/h)" for r in fits[1:])
+    return output_text.replace(INSTANCE_PLACEHOLDER, best["instance"]) + (
+        f"\n\nCATALOG-VERIFIED INSTANCE (AWS us-east-1 on-demand, current generation): {best['instance']} - "
+        f"{best['vcpu']} vCPU, {best['mem']:g} GiB, ${best['usd']:.4f}/h; cheapest fit for {cpus:g} vCPU / {mem:g} GiB."
+        + (f" Next cheapest: {others}." if others else ""))
+
 
 def _depth_reasoning_prefix(depth: int) -> str:
     """Returns a reasoning instruction appended to the cloud prompt at depth > 1."""
@@ -84,6 +146,16 @@ the expected compute profile of the tool.
 3. EXTRAPOLATION RULE: After pasting the warning, use your internal LLM expertise to categorize the tool (e.g., CPU-bound vs. GPU-bound) and apply the closest matching rules from the context.
 
 4. PROFILE ALIGNMENT: Adapt your response style (code-heavy vs. explanation-heavy) based on the USER PROFILE.
+
+5. SIZING: Size the specific step or workload in the request, not a whole pipeline. When the context lists
+   default resources for comparable tools or pipeline steps (for example nf-core process labels), base your
+   estimate on the closest ones and name them. Over-provisioning wastes money: request the smallest CPU and
+   memory that run the step reliably.
+
+6. INSTANCE: Do not choose the EC2 instance type yourself. Write <INSTANCE> wherever the instance type goes;
+   it is filled in from the AWS price catalog as the cheapest instance that fits your SIZING line.
+
+7. End your response with one line of exactly this form: SIZING: cpus=<integer> memory_gb=<number>
 """
 
 async def call_cloud_agent(user_input: str, strategy: str = "cot", depth: int = 1, agent_registry: str = "", user_profile_str: str = "") -> tuple[str, dict]:
@@ -92,7 +164,8 @@ async def call_cloud_agent(user_input: str, strategy: str = "cot", depth: int = 
     if not model: return "[Cloud Agent - Mock] No API Key.", _zero
 
     try:
-        retrieved_context = _query_vector_db(user_input)
+        # Search with the task itself; the upstream context that engine.py prepends would dominate the embedding.
+        retrieved_context = _query_vector_db(f"{task_text(user_input)} {entities(user_input)}".strip(), n_results=8)
         
         prompt = CLOUD_PROMPT.format(
             subtask=user_input,
@@ -103,7 +176,7 @@ async def call_cloud_agent(user_input: str, strategy: str = "cot", depth: int = 
 
         # Generate the infrastructure code
         response = await asyncio.to_thread(model.generate_content, prompt)
-        output_text = response.text.strip()
+        output_text = _attach_instance(response.text.strip(), user_input)
         _usage = getattr(response, "usage_metadata", None)
         _agent_tokens = {
             "input":  getattr(_usage, "prompt_token_count", 0) or 0,

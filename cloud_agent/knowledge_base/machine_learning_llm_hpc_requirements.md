@@ -1,5 +1,7 @@
 # HPC Hardware Guidelines: Custom Machine Learning & LLM Training
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Training Custom Deep Learning Models (CNNs, Transformers)
 - **Compute Profile:** Extremely GPU-bound. Matrix multiplications require high-bandwidth GPU memory (VRAM).
 - **Hardware Recommendation:** AWS P-Family (e.g., `p4d` or `p5`) for large models, or G-Family (e.g., `g5`) for medium models. GCP A2/A3 VMs.

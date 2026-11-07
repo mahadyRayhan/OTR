@@ -46,6 +46,11 @@ class Config:
     USE_AGENT_JUDGE = True
     USE_FINAL_JUDGE = True
 
+    # Per-node fitness threshold tau (paper, Section 4.2.1). A node whose judge
+    # fitness score falls below tau gets a failure descriptor and is repaired.
+    # Runs before Nov 2026 used a hard-coded 0.80.
+    PER_NODE_TAU = 0.70
+
     # ---------------------------------------------------------
     # MODELS
     # ---------------------------------------------------------
@@ -54,8 +59,20 @@ class Config:
     # run, and a miscalibrated judge triggers unnecessary Reflexion (+40s).
     # RAG uses Flash Lite (rag_config.py). CODE/CLOUD already use Flash (their own GEMINI_MODEL).
     # GENERATION_MODEL = "gemini-flash-latest"
-    GENERATION_MODEL = "gemini-3.1-flash-lite-preview"
+    # Vertex AI serves the released "gemini-3.1-flash-lite"; the ICDCN runs used "-preview" (AI Studio).
+    GENERATION_MODEL = "gemini-3.1-flash-lite"
+    # JUDGE_MODEL is the EVALUATION judge used by scripts/eval/*.
     JUDGE_MODEL = "gpt-5.4"
+    # IN_LOOP_JUDGE_MODEL is the system-level judge that drives global retries
+    # inside a run. It must not be the evaluation judge, or the system is
+    # optimised against the metric it is scored on. Runs before Nov 2026 used
+    # JUDGE_MODEL here.
+    IN_LOOP_JUDGE_MODEL = GENERATION_MODEL
+    # Evaluation judges for the journal experiments (journal_fixes/). Two different
+    # Gemini models (OpenAI access unavailable in Nov 2026); neither is the system model.
+    EVAL_JUDGES = ["gemini-3.1-pro-preview", "gemini-3-flash-preview"]
+    # Strong single-model baseline (replaces the GPT-5 baseline); not used as a judge.
+    STRONG_BASELINE_MODEL = "gemini-3.5-flash"
 
     # ---------------------------------------------------------
     # AGENT CAPABILITIES (Master Registry)

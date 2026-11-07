@@ -56,7 +56,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
-import google.generativeai as genai
+import gemini_client as genai
+from scholar_agent.intent import PAPER_LOOKUP, is_paper_lookup
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ class PlanAndSolveDecomposer(BaseDecomposer):
         text = res.text.replace("```json", "").replace("```", "").strip()
 
         try:
-            data = json.loads(text)
+            data = genai.parse_json(text)
             return [
                 TaskNode(id=t["id"], agent=t["agent"], query=t["query"])
                 for t in data["tasks"]
@@ -197,7 +198,7 @@ class LLMCompilerDecomposer(BaseDecomposer):
         text = res.text.replace("```json", "").replace("```", "").strip()
 
         try:
-            data = json.loads(text)
+            data = genai.parse_json(text)
             return [
                 TaskNode(
                     id=t["id"],
@@ -288,10 +289,38 @@ QDMR_OP_TO_STRATEGY: Dict[QDMROp, str] = {
     QDMROp.ARITHMETIC:    "cot",   # single numeric result
 }
 
+_COMPUTE_VERB = r"\b(?:calculat|comput|count|locat|find|identif|translat|digest|scan|measur|determin|predict|analy[sz])\w*\b"
+_GIVEN_DATA = (r"\b(?:provided|given|supplied|following|above|input)\s+(?:[\w-]+\s+){0,2}"
+               r"(?:sequences?|templates?|strings?|data(?:set)?|tables?|values|reads|matri(?:x|ces))\b")
+
 # Ordered pattern rules: first match wins.
 # Patterns are ordered from most specific domain signal to most generic.
 # Each tuple: (compiled regex, QDMROp)
 QDMR_PATTERN_RULES: List[Tuple[re.Pattern, QDMROp]] = [
+    # ── Paper lookup (which paper / its DOI) → Scholar paper mode ───────────
+    # First, so that tool descriptions in the goal ("alignment program",
+    # "EC2") do not route a paper lookup to CODE or CLOUD.
+    (PAPER_LOOKUP, QDMROp.EXPERT),
+
+    # ── Compute sizing → Cloud (it holds the hardware guides and analogue modules) ──
+    # Phrases, not bare "memory", so that "memory B cells" stays with RAG.
+    (re.compile(
+        r"\b(?:how\s+many|number\s+of)\s+(?:v?cpus?|cores|threads)\b"
+        r"|\b(?:v?cpus?|cores?|memory|ram|hardware|compute|resources?)\s+"
+        r"(?:requirements?|needs|requests?|usage|footprint|allocation|sizing)\b"
+        r"|\b(?:estimate|size|sizing|provision)\w*\b[^.?!\n]{0,40}?\b(?:v?cpus?|cores|memory|ram)\b",
+        re.IGNORECASE,
+    ), QDMROp.DEPLOY),
+
+    # ── Computation on data the query gives → Code (script + traced result) ─
+    # Before ARITHMETIC/AGGREGATE, whose literature questions ("what FDR did the
+    # study use") stay with RAG: only goals that compute on supplied data match.
+    (re.compile(
+        rf"{_COMPUTE_VERB}[^.?!\n]{{0,80}}?{_GIVEN_DATA}|{_GIVEN_DATA}[^.?!\n]{{0,80}}?{_COMPUTE_VERB}"
+        r"|\b(?:data|sequences?|templates?|values)\s+given\s+in\s+the\s+query\b",
+        re.IGNORECASE,
+    ), QDMROp.CODE),
+
     # ── Infrastructure / cloud ──────────────────────────────────────────────
     (re.compile(
         r"\b(deploy|aws|s3|ec2|lambda|docker|kubernetes|k8s|"
@@ -481,6 +510,8 @@ def _annotate_query(clause: str, op: QDMROp, agent: str) -> str:
         strategy = QDMR_OP_TO_STRATEGY.get(op, "tot")
         return f"{clause} --strategy={strategy}"
     if agent == "scholar":
+        if is_paper_lookup(clause):
+            return clause  # paper mode; an expert count would turn it into an expert search
         if not re.search(r"\bfind\s+\d+\b", clause, re.IGNORECASE):
             return f"Find 2 experts on: {clause}"
     return clause
@@ -833,6 +864,8 @@ def _build_coverage_query(
         return f"{base} --strategy={strategy}"
 
     if agent == "scholar":
+        if is_paper_lookup(original_query):
+            return original_query
         if not re.search(r"\bfind\s+\d+\b", base, re.IGNORECASE):
             base = f"Find 2 experts on: {original_query}"
     return base
@@ -951,6 +984,12 @@ STRICT RULES:
 3. If goal N must use the result of goal M, add M to "depends_on" for goal N
    and write a placeholder like "[result of goal M]" in the goal text.
 4. DO NOT assign agents — just write the goal text clearly.
+5. A goal that refers to "the given ..." or "the provided ..." data or options receives the user
+   query with it, so data the query gives (sequences, tables, values, answer options) needs no
+   goal to retrieve it. Agents cannot run code, so never write a goal to execute or run a script.
+6. When the answer is computed from data given in the query (e.g. sites or lengths in a given
+   sequence, a statistic of given values), make that computation ONE goal that says it uses the
+   data given in the query; do not split it into look-up, locate, count and compare goals.
 
 User Intent Profile (calibrate subtask depth accordingly):
 {profile_hint}
@@ -985,7 +1024,7 @@ User Query: {query}
                 timeout=_NEURAL_PHASE_TIMEOUT_S,
             )
             text = res.text.replace("```json", "").replace("```", "").strip()
-            data = json.loads(text)
+            data = genai.parse_json(text)
             goals = data.get("goals", [])
             if not goals:
                 raise ValueError("LLM returned empty goal list.")

@@ -1,5 +1,7 @@
 # HPC Hardware Guidelines: Health & Medical Science
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Clinical Machine Learning on Structured EHR Data
 - **Compute Profile:** CPU-bound and modest. Gradient-boosted trees (XGBoost, LightGBM) and regression on tabular cohorts of 10⁴–10⁷ rows rarely need a GPU or more than one node.
 - **Hardware Recommendation:** A single memory-optimised R-family instance (r6i/r7i). Do not provision HPC or GPU capacity by default — the constraint is dataset size in memory, not FLOPs.

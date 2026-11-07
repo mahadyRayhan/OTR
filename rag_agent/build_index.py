@@ -15,6 +15,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ from rag_agent.knowledge_base import KnowledgeBase
 
 # ── tunables ─────────────────────────────────────────────────────────────────
 KB_DIR          = THIS_DIR / "knowledge_base"   # folder containing the PDFs
+OA_DIR          = KB_DIR / "oa_corpus"          # open-access full texts + manifest.json
 CHUNK_SIZE      = 350   # words per chunk
 CHUNK_OVERLAP   = 60    # words of overlap between adjacent chunks
 MIN_CHUNK_WORDS = 80    # discard very short chunks (headers, page numbers, etc.)
@@ -48,11 +50,14 @@ def extract_pdf_text(path: Path) -> str:
       3. pypdf         — pure-Python fallback
       4. pdfplumber    — last resort
     """
-    try:
-        import pymupdf4llm  # type: ignore
-        return pymupdf4llm.to_markdown(str(path))
-    except ImportError:
-        pass
+    # RAG_PDF_EXTRACTOR=fitz skips pymupdf4llm, whose Tesseract OCR pass can
+    # crash the process on some PDFs.
+    if os.environ.get("RAG_PDF_EXTRACTOR", "").lower() != "fitz":
+        try:
+            import pymupdf4llm  # type: ignore
+            return pymupdf4llm.to_markdown(str(path))
+        except ImportError:
+            pass
 
     try:
         import fitz  # type: ignore  (PyMuPDF)
@@ -186,7 +191,9 @@ def parse_metadata(text: str, filename_stem: str) -> dict:
 
 def main() -> None:
     pdfs = sorted(KB_DIR.glob("*.pdf"))
-    if not pdfs:
+    oa_manifest_path = OA_DIR / "manifest.json"
+    oa_manifest = json.loads(oa_manifest_path.read_text()) if oa_manifest_path.exists() else {}
+    if not pdfs and not oa_manifest:
         print(f"No PDF files found in {KB_DIR}")
         print("Place your paper PDFs in that folder and re-run.")
         return
@@ -250,6 +257,31 @@ def main() -> None:
             all_ids.append(pmid)
 
         print()
+
+    # ── Open-access full texts (journal_fixes/scripts/collect_oa_papers.py) ──
+    # Metadata comes from Europe PMC, not from heuristics, so every chunk
+    # carries a real title, year, journal, PMID and citable URL.
+    for pmcid, rec in sorted(oa_manifest.items()):
+        txt_path = OA_DIR / f"{pmcid}.txt"
+        if not txt_path.exists():
+            continue
+        text = clean_text(txt_path.read_text(encoding="utf-8"))
+        chunks = chunk_text(text)
+        print(f"[OA] {pmcid}  {len(chunks):3d} chunks  {str(rec.get('title'))[:70]}")
+        for i, chunk in enumerate(chunks):
+            cid = f"PMC:{pmcid}:c{i}"
+            all_texts.append(f"{rec.get('title') or ''} {chunk}")
+            all_metadatas.append({
+                "title":    rec.get("title") or "",
+                "authors":  "",
+                "journal":  rec.get("journal") or "",
+                "year":     int(rec.get("year") or 0),
+                "pmid":     str(rec.get("pmid") or cid),
+                "abstract": chunk,
+                "url":      rec.get("url") or "",
+                "source":   "europepmc_oa",
+            })
+            all_ids.append(cid)
 
     if not all_texts:
         print("No content could be extracted from any PDF. Check PDF readability.")

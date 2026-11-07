@@ -1,5 +1,7 @@
 # Cloud Pricing and Optimization for Bioinformatics
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## EC2 Spot Instances
 - Bioinformatics pipelines (like Nextflow and Snakemake) are generally fault-tolerant and stateless. This makes them perfect candidates for AWS Spot Instances or GCP Preemptible VMs.
 - **Cost Savings:** Using Spot Instances reduces compute costs by up to 90%. 

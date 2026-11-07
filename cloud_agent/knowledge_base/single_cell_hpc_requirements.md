@@ -1,5 +1,7 @@
 # HPC Hardware Guidelines: Single-Cell Transcriptomics
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Preprocessing & Alignment (CellRanger, STAR)
 - **Compute Profile:** Highly memory-bound. Spliced alignment requires loading massive reference genomes into RAM.
 - **Hardware Recommendation:** AWS R-Family or X-Family (e.g., `r6a.16xlarge` or `x2idn.16xlarge`).

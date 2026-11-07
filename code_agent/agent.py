@@ -19,9 +19,11 @@ Engine-facing signature (called by orchestrator/engine.py -> _execute_agent):
 """
 
 import os
+import re
 import asyncio
 import chromadb
-import google.generativeai as genai
+import gemini_client as genai
+from orchestrator.context_format import entities, task_text
 from typing import Optional
 
 # Ensure chromadb doesn't spam warnings
@@ -32,7 +34,9 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # ---------------------------------------------------------------------------
 # GEMINI_MODEL = "gemini-flash-latest"
 GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
-DB_DIR = os.path.join(os.path.dirname(__file__), "chroma_db")
+# SCIWEAVER_INDEX_DIR selects an alternative index set (e.g. a benchmark-aligned corpus).
+DB_DIR = (os.path.join(os.environ["SCIWEAVER_INDEX_DIR"], "code") if os.environ.get("SCIWEAVER_INDEX_DIR")
+          else os.path.join(os.path.dirname(__file__), "chroma_db"))
 
 def _get_model() -> Optional[genai.GenerativeModel]:
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -129,11 +133,20 @@ CRITICAL RULES FOR GENERATION (YOU MUST FOLLOW THESE EXACTLY):
 
 3. GAP FILLING: You MAY write gap-filling code (e.g. imports, file loading) not in the context, but you MUST tag it `# [AI-GENERATED]`.
 
-4. REFUSAL: If the core biological algorithm requested is entirely absent from the context, output:
+4. REFUSAL: If the request needs a specific tool or library whose API is entirely absent from the context, do not
+   invent its calls; output:
    # [AI-GENERATED]
    # ERROR: The requested core algorithm is not present in the local knowledge base.
+   Logic written in plain Python (string search, counting, arithmetic, parsing) is not a refusal case: write it
+   and tag it `# [AI-GENERATED]`.
 
-5. FORMAT: Return ONLY the final assembled Python script wrapped in markdown ```python ``` blocks. No text outside the blocks.
+5. FORMAT: Return the final assembled Python script wrapped in markdown ```python ``` blocks. No text outside the
+   blocks, except the section of rule 6.
+
+6. WORKED RESULT: If the request supplies the input data (e.g. a sequence, a table, values) and asks for a result
+   computed from it, add after the code block a section headed `### Worked result`. The script will not be run, so
+   apply its logic to the supplied data yourself, step by step, showing the intermediate values (e.g. every match
+   with its position, each length), and end with a line `RESULT: <value>`.
 """
 
 # ---------------------------------------------------------------------------
@@ -230,7 +243,8 @@ async def call_code_agent(
 
     try:
         # 1. Retrieve trusted code chunks and pipeline logic from ChromaDB
-        retrieved_context = _query_vector_db(user_input, n_results=5)
+        # Search with the task itself; the upstream context that engine.py prepends would dominate the embedding.
+        retrieved_context = _query_vector_db(f"{task_text(user_input)} {entities(user_input)}".strip(), n_results=5)
 
         if not retrieved_context.strip():
             return "[Code Agent] ERROR: Local Vector DB is empty or missing. Please run build_vector_db.py to ingest the .ipynb notebooks.", _zero
@@ -250,14 +264,15 @@ async def call_code_agent(
         
         # 4. Extract just the Python code
         clean_python_script = []
-        if "```" in output_text:
-            parts = output_text.split("```")
+        script_text, *worked = re.split(r"^#{1,4}\s*Worked result\b", output_text, maxsplit=1, flags=re.M | re.I)
+        if "```" in script_text:
+            parts = script_text.split("```")
             for p in parts[1::2]:
                 cleaned = p.lstrip("python").lstrip("python3").strip()
                 if cleaned: 
                     clean_python_script.append(cleaned)
         else:
-            clean_python_script.append(output_text)
+            clean_python_script.append(script_text)
             
         full_code = "\n\n".join(clean_python_script)
 
@@ -291,6 +306,8 @@ async def call_code_agent(
             f"{full_code}\n"
             f"```\n"
         )
+        if worked:  # rule 6: the result traced by hand on the supplied data
+            final_output += "\n### Worked result" + worked[0].rstrip() + "\n"
         if "```" not in final_output:
             final_output = f"[STRUCTURAL_FAIL: no code block generated]\n{final_output}"
         return final_output, _agent_tokens

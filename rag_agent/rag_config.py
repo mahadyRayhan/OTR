@@ -82,7 +82,9 @@ class Settings(BaseSettings):
 
     # ── ChromaDB Vector Store ────────────────────────────────────────────────
     chroma_db_path: str = Field(
-        default_factory=lambda: os.path.join(_AGENT_DIR, "chroma_db"),
+        # SCIWEAVER_INDEX_DIR selects an alternative index set (e.g. a benchmark-aligned corpus).
+        default_factory=lambda: os.path.join(os.environ["SCIWEAVER_INDEX_DIR"], "rag")
+        if os.environ.get("SCIWEAVER_INDEX_DIR") else os.path.join(_AGENT_DIR, "chroma_db"),
         description="Path to ChromaDB persistent store for RAG papers",
     )
     chroma_collection_name: str = Field(

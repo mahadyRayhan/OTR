@@ -1,5 +1,7 @@
 # Operating System and Container Standards
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Base Operating Systems
 - **Ubuntu 22.04 LTS (Jammy Jellyfish):** The absolute standard for bioinformatics. It has the best support for apt-get bioinformatics packages, Python compilation, and CUDA drivers.
 - **Amazon Linux 2023:** Highly optimized for AWS environments (ECS, Batch). Smaller footprint, but lacks some pre-compiled scientific libraries found in Ubuntu.

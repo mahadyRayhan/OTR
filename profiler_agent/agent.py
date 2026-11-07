@@ -78,7 +78,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import google.generativeai as genai
+import gemini_client as genai
 
 logger = logging.getLogger(__name__)
 
@@ -520,7 +520,7 @@ class DynamicProfiler:
                 timeout=_LLM_TIMEOUT_S,
             )
             text = res.text.replace("```json", "").replace("```", "").strip()
-            raw: Dict[str, float] = json.loads(text)
+            raw: Dict[str, float] = genai.parse_json(text)
 
             # Validate keys
             result: Dict[Dim, float] = {}

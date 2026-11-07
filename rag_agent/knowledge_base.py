@@ -617,8 +617,8 @@ class KnowledgeBase:
                 "All %d papers scored below threshold %.2f — returning top-%d anyway.",
                 len(ranked), settings.confidence_threshold, k,
             )
-            return ranked[:k]
-        return filtered[:k]
+            filtered = ranked
+        return self._cap_per_paper(filtered, k)
 
     def get_tools_for_topic(self, topic_name: str) -> list[str]:
         """Return tools from the registry relevant to a topic name."""
@@ -665,6 +665,19 @@ class KnowledgeBase:
         return papers
 
     @staticmethod
+    def _cap_per_paper(ranked: list[Paper], k: int, per_paper: int = 3) -> list[Paper]:
+        """Top k passages, at most per_paper from one paper, so one long paper cannot crowd out the rest."""
+        out, count = [], {}
+        for p in ranked:
+            key = p.pmid or p.title
+            if count.get(key, 0) < per_paper:
+                out.append(p)
+                count[key] = count.get(key, 0) + 1
+            if len(out) == k:
+                break
+        return out
+
+    @staticmethod
     def _deduplicate(papers: list[Paper]) -> list[Paper]:
         """
         Merge duplicate papers.
@@ -693,7 +706,24 @@ class KnowledgeBase:
             # Lower-case + collapse non-alphanumeric runs to a single space
             return _re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
+        seen_chunks: set[tuple[str, str]] = set()
         for p in papers:
+            # ── Local chunks: one entry per passage ───────────────────────────
+            # Full-text papers are indexed as many chunks sharing the paper's PMID
+            # and title; keying them on the paper kept only the first chunk, so
+            # an answer in any other passage was never seen. A local chunk is a
+            # duplicate only of the same passage, and its paper is then known.
+            if p.source == "chroma":
+                key = (p.pmid or _norm_title(p.title), _norm_title((p.abstract or "")[:200]))
+                if key in seen_chunks:
+                    continue
+                seen_chunks.add(key)
+                if p.pmid and not p.pmid.startswith("SS:"):
+                    seen_pmids.add(p.pmid)
+                seen_titles.add(_norm_title(p.title))
+                unique.append(p)
+                continue
+
             # ── PMID deduplication ────────────────────────────────────────────
             has_real_pmid = bool(p.pmid) and not p.pmid.startswith("SS:")
             if has_real_pmid:

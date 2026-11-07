@@ -1,5 +1,7 @@
 # HPC Hardware Guidelines: Genomics & DNA Sequencing
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Read Alignment (BWA, Bowtie2)
 - **Compute Profile:** CPU-bound. These algorithms require massive parallelization across CPU cores to align millions of short reads.
 - **Hardware Recommendation:** AWS C-Family (e.g., `c6i.8xlarge` with 32 vCPUs). 

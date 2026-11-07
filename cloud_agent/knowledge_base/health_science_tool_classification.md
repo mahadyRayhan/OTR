@@ -1,5 +1,7 @@
 # Tool Classification Reference: Health & Medical Science
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Clinical Data Warehouses and Common Data Models (OMOP, OHDSI, i2b2, REDCap)
 - **Tools:** OMOP CDM, OHDSI ATLAS, OHDSI ACHILLES, i2b2, REDCap, TriNetX, PCORnet, Epic Clarity, Cerner HealtheIntent, FHIR, HL7 v2.
 - **Compute Profile:** Database and query-bound. Not HPC. Sized by data volume and query concurrency, never by core count.

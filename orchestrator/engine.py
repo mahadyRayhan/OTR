@@ -11,12 +11,14 @@ import json
 # import os
 from datetime import datetime
 import re
-import google.generativeai as genai
+import gemini_client as genai
 from openai import AsyncOpenAI
 from typing import Dict, Any, List
 import time
 
 import config
+from . import usage_meter
+usage_meter.install()
 from .decomposers import DecomposerRegistry, AutoDecomposerSelector
 from .dag_builders import DAGRegistry
 from .evaluation.communication_log import comm_tracker
@@ -24,6 +26,7 @@ from .evaluation.communication_log import comm_tracker
 
 # Import the GoT Classes
 from .adaptive_got_dag import AdaptiveGoTOrchestrator, GoTNode, DepthBudget, GoTOp
+from .context_format import with_request
 
 # 🚀 CORRECTED IMPORTS: Pointing to the specific agent folders
 from rag_agent.knowledge_base import KnowledgeBase
@@ -473,6 +476,11 @@ class OrchestratorEngine:
 
         # Append profile-driven depth instruction to every non-scholar agent.
         # Scholar is API-driven; instruction text would be ignored.
+        # Goals refer to data the request gives ("the provided sequence", "options A-D"); pass it along.
+        # Scholar searches with its query text and gets the request itself for paper lookups.
+        if agent_name != "scholar":
+            clean_query = with_request(clean_query, getattr(self, "_user_query", ""))
+
         depth_instr = self._depth_instruction(agent_name)
         if depth_instr and agent_name != "scholar":
             clean_query = f"{clean_query}\n\n[DEPTH REQUIREMENT]: {depth_instr}"
@@ -614,7 +622,8 @@ class OrchestratorEngine:
         return query
 
     async def _gpt_as_judge(self, user_input: str, final_answer: str) -> str:
-        if not self.openai_client:
+        judge_model = config.Config.IN_LOOP_JUDGE_MODEL
+        if judge_model.startswith("gpt") and not self.openai_client:
             return "Score: 0/10 - OpenAI API Key missing for Judge."
         judge_prompt = f"""
         You are an impartial AI Judge evaluating a multi-agent system.
@@ -625,12 +634,19 @@ class OrchestratorEngine:
         - Did it perform ALL tasks? (Deduct 3 points for missing tasks).
         - If asked for code, is there code? If asked for experts, are there real names?
         - CRITICAL DEPENDENCY CHECK: If the query asks the system to use specific information, but the answer looks like generic LLM hallucinations or ignores the dependencies, SCORE IT A MAXIMUM OF 4/10.
+        - You cannot check identifiers (DOIs, accession numbers) or numeric values against sources here, so do
+          not lower the score because you believe one is wrong; judge completeness, format and consistency.
         
         Format exactly as: 'Score: X/10 - [Reason]'
         """
         try:
+            if not judge_model.startswith("gpt"):
+                judge = genai.GenerativeModel(judge_model)
+                resp = await asyncio.to_thread(judge.generate_content, judge_prompt,
+                                               generation_config={"temperature": 0.0})
+                return resp.text.strip()
             response = await self.openai_client.chat.completions.create(
-                model=config.Config.JUDGE_MODEL,
+                model=judge_model,
                 messages=[{"role": "user", "content": judge_prompt}],
                 temperature=0.0
             )
@@ -826,6 +842,9 @@ class OrchestratorEngine:
     async def _execute_pipeline(self, user_input: str, decomposer_name: str, ablation_mode: str = "adaptive", start_time: float = None, cached_tasks=None) -> Dict[str, Any]:
         self.current_run_cugcr_triggered = False
         self._node_metadata = {}
+        self._user_query = user_input  # read by _execute_agent
+        usage_meter.reset()
+        low_conf_note = ""
 
         profiler_t0 = time.monotonic()
         profiler_task = None
@@ -926,11 +945,34 @@ class OrchestratorEngine:
                 style_guideline = ""
 
             got_orchestrator = AdaptiveGoTOrchestrator(
-                quality_threshold=0.80,
+                quality_threshold=config.Config.PER_NODE_TAU,
                 beam_width=2,
                 max_expansions=6,
                 depth_budget=DepthBudget(base_depth=1, weight_per_level=20, max_depth=3)
             )
+
+            async def synthesize(outputs: list) -> str:
+                """Final answer to the user's query from the agent outputs, in the format the query asks for."""
+                full_context = "\n\n".join([f"--- Source {i+1} ---\n{o}" for i, o in enumerate(outputs)])
+                agg_prompt = f"""
+                Synthesize a final response to the user's original query using ONLY these outputs:
+                User's Original Query: "{user_input}"
+                Agent Outputs:
+                {full_context}
+                {style_guideline}
+
+                Copy identifiers (DOIs, accession numbers, commands, instance types) exactly as they appear
+                in the agent outputs; never invent one. Where outputs disagree, prefer the one an agent marks
+                as verified against a source (a paper search result, a CATALOG-VERIFIED instance).
+
+                If the user's original query specifies an output format (for example a required final
+                line or a JSON object), your response must follow it exactly.
+                """
+                res = await asyncio.to_thread(self.llm.generate_content, agg_prompt.strip())
+                if hasattr(res, "usage_metadata") and res.usage_metadata:
+                    orchestrator_tokens["input"]  += getattr(res.usage_metadata, "prompt_token_count", 0) or 0
+                    orchestrator_tokens["output"] += getattr(res.usage_metadata, "candidates_token_count", 0) or 0
+                return res.text.strip()
 
             async def got_executor(node: GoTNode) -> str:
                 query = node.task.query
@@ -939,21 +981,7 @@ class OrchestratorEngine:
                 if node.op == GoTOp.AGGREGATE:
                     print(f"      [GoT Operator] Safe Processing for AGGREGATE node...")
                     real_parents = [p for p in parent_nodes if p.result]
-                    if len(real_parents) == 1:
-                        return real_parents[0].result
-                    full_context = "\n\n".join([f"--- Source {i+1} ---\n{p.result}" for i, p in enumerate(real_parents)])
-                    agg_prompt = f"""
-                    Synthesize a final response to the user's original query using ONLY these outputs:
-                    User's Original Query: "{user_input}"
-                    Agent Outputs:
-                    {full_context}
-                    {style_guideline}
-                    """
-                    res = await asyncio.to_thread(self.llm.generate_content, agg_prompt.strip())
-                    if hasattr(res, "usage_metadata") and res.usage_metadata:
-                        orchestrator_tokens["input"]  += getattr(res.usage_metadata, "prompt_token_count", 0) or 0
-                        orchestrator_tokens["output"] += getattr(res.usage_metadata, "candidates_token_count", 0) or 0
-                    return res.text.strip()
+                    return await synthesize([p.result for p in real_parents])
 
                 if node.op == GoTOp.REFINE:
                     print(f"      [GoT Operator] Safe Processing for REFINE node with Reflexion...")
@@ -1045,7 +1073,20 @@ class OrchestratorEngine:
                 model=self.llm if config.Config.USE_AGENT_JUDGE else None,
                 agent_executor=got_executor
             )
-            
+            # With a single leaf no AGGREGATE node is built and the answer is one agent's raw output;
+            # synthesise it too, so the user's question (and any output format it asks for) is answered.
+            if got_orchestrator.dag and not any(n.op == GoTOp.AGGREGATE for n in got_orchestrator.dag._nodes.values()):
+                final_answer = await synthesize([final_answer])
+
+            # Calibrated abstention (paper, Section 4): sub-tasks that are still
+            # below tau after the repair budget are surfaced as low-confidence.
+            # Appended after the global retry loop, whose re-synthesis would drop it.
+            low_conf = got_orchestrator.low_confidence_nodes() if got_orchestrator.dag else []
+            if low_conf:
+                low_conf_note = "\n\n**Low-confidence parts** (could not be verified within the repair budget):\n" + "\n".join(
+                    f"- {n.task.query[:160]} (fitness {n.quality_score:.2f}"
+                    f"{', ' + n.failure_mode.value if n.failure_mode else ''})" for n in low_conf)
+
         else:
             final_answer = "Error: System currently requires 'got_dag' builder."
 
@@ -1075,6 +1116,7 @@ class OrchestratorEngine:
                     "parent_ids":          node.parent_ids,
                     "failure_mode":        node.failure_mode.value if node.failure_mode else None,
                     "quality_score":       node.quality_score,
+                    "low_confidence":      node in got_orchestrator.low_confidence_nodes(),
                     "judge_critique":      node.judge_reasoning,
                     "elapsed_s":           node.elapsed_s,
                     "output":              node.result,
@@ -1138,14 +1180,20 @@ class OrchestratorEngine:
 
             IMPORTANT: If the original query asked for a specific number of items (e.g., 2 experts), the revised_query MUST explicitly include that number so the downstream agent knows the quota.
 
+            The revised_query says what the agent should search for or fix. It must NOT state or suggest an
+            answer, option, value or identifier (a DOI, number, name or choice): those must come from the
+            agent's sources, and a guess written into the query would be copied into the answer.
+
             Output ONLY a JSON object:
             {{"failing_agent": "scholar", "revised_query": "specific corrective instruction"}}
             """
             try:
                 res = await asyncio.to_thread(self.llm.generate_content, diag_prompt)
-                diag_data = json.loads(res.text.replace('```json', '').replace('```', '').strip())
+                diag_data = genai.parse_json(res.text)
                 agent = diag_data.get('failing_agent', 'rag')
                 new_q = diag_data.get('revised_query', user_input)
+                # Identifiers in the instruction would be copied into the answer unverified.
+                new_q = re.sub(r"\b10\.\d{4,9}/[^\s\"'<>,;)\]]+", "[identifier to be found]", new_q)
 
                 print(f"   [Diagnostician] Retrying agent '{agent}' with query: '{new_q}' at HIGHER DEPTH (3).")
 
@@ -1169,7 +1217,10 @@ class OrchestratorEngine:
 
                 fix_result, _ = await self._execute_agent(agent, new_q, depth=3)
 
-                synth_prompt = f"Update the final answer with this new information.\nOld Answer:\n{final_answer}\n\nNew Info:\n{fix_result}\n\nNew Final Answer:"
+                # The question is restated so the rewrite keeps any output format it asks for.
+                synth_prompt = (f"Update the final answer to the user's question with this new information. "
+                                f"Follow any output format the question asks for.\n\nQuestion:\n{user_input}\n\n"
+                                f"Old Answer:\n{final_answer}\n\nNew Info:\n{fix_result}\n\nNew Final Answer:")
                 final_answer = (await asyncio.to_thread(self.llm.generate_content, synth_prompt)).text.strip()
 
                 judge_score_raw = await self._gpt_as_judge(user_input, final_answer)
@@ -1194,6 +1245,8 @@ class OrchestratorEngine:
             except Exception as e:
                 print(f"[Diagnostics Error] Global retry failed: {e}")
                 break
+
+        final_answer += low_conf_note
 
         latency = round(time.time() - start_time, 2) if start_time else 0.0
 
@@ -1315,6 +1368,8 @@ class OrchestratorEngine:
             "final_judge_score":     numeric_score,
             "final_judge_raw":       judge_score_raw,
             "final_answer":          final_answer,
+            # ── Every LLM call in this run, per model (includes the final judge) ──
+            "llm_usage":             usage_meter.snapshot(),
         }
 
         telemetry_file = "experiment_telemetry.json"
@@ -1335,7 +1390,8 @@ class OrchestratorEngine:
             "final_answer": final_answer, 
             "judge_score": judge_score_raw, 
             "numeric_score": numeric_score,
-            "communication_metrics": comm_data
+            "communication_metrics": comm_data,
+            "llm_usage": run_telemetry["llm_usage"],
         }
 
     async def run(self, user_input: str, ablation_mode: str = "adaptive", start_time: float = None,

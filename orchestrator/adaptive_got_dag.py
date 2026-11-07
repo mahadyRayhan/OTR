@@ -75,7 +75,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
-import google.generativeai as genai
+import gemini_client as genai
 import config
 
 # ── import sibling modules (or stub if running standalone) ────────────────────
@@ -169,12 +169,24 @@ class FailureMode(str, Enum):
                         Fix: None. Expanding will loop. Expansion BLOCKED.
     UNKNOWN           — Judge could not determine the failure type (heuristic path).
                         Treated conservatively: expansion ALLOWED once, then blocked.
+
+    The paper's taxonomy (Section 4.2.2) is what the judge now emits:
+    SPECIFICITY       — output too generic for its downstream consumer.
+    COVERAGE          — required fields or parts of the sub-task are missing.
+    RELEVANCE         — output drifted from the sub-task objective.
+    KNOWLEDGE_BOUNDARY— the agent cannot improve by reformulation (same role as
+                        MISSING_DATA: expansion BLOCKED, sub-task surfaced as low-confidence).
+    The older values stay valid so earlier telemetry still parses.
     """
-    SHALLOW_REASONING = "shallow_reasoning"
-    LOGICAL_ERROR     = "logical_error"
-    FORMAT_ERROR      = "format_error"
-    MISSING_DATA      = "missing_data"
-    UNKNOWN           = "unknown"
+    SHALLOW_REASONING  = "shallow_reasoning"
+    LOGICAL_ERROR      = "logical_error"
+    FORMAT_ERROR       = "format_error"
+    MISSING_DATA       = "missing_data"
+    UNKNOWN            = "unknown"
+    SPECIFICITY        = "specificity"
+    COVERAGE           = "coverage"
+    RELEVANCE          = "relevance"
+    KNOWLEDGE_BOUNDARY = "knowledge_boundary"
 
 
 # Modes that can potentially be fixed by deeper computation
@@ -183,7 +195,17 @@ _EXPANDABLE_MODES: frozenset = frozenset({
     FailureMode.LOGICAL_ERROR,
     FailureMode.FORMAT_ERROR,
     FailureMode.UNKNOWN,
+    FailureMode.SPECIFICITY,
+    FailureMode.COVERAGE,
+    FailureMode.RELEVANCE,
 })
+
+# Targeted reformulation per failure sub-type (paper, Section 4.2.3)
+_REPAIR_HINT: dict = {
+    FailureMode.SPECIFICITY: "Make the sub-queries narrower and entity-targeted: name the exact tools, parameters, genes or resources the downstream step needs.",
+    FailureMode.COVERAGE:    "Make the sub-queries broader and explicitly list every field or part the previous answer left out.",
+    FailureMode.RELEVANCE:   "Re-anchor the sub-queries on the original sub-task objective and drop material that drifted away from it.",
+}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -307,20 +329,25 @@ Score the following answer on a scale of 1 to 10 using EXACTLY these criteria:
   Accuracy     (1-10): Are the claims factually correct?
   Clarity      (1-10): Is it well-structured and easy to follow?
 
+Judge fitness for the DOWNSTREAM CONSUMERS listed below, not isolated correctness:
+a technically correct answer still fails if it lacks the specificity they need.
+
 Also classify the PRIMARY reason the score is below 10, choosing EXACTLY one:
-  "shallow_reasoning" — answer exists but lacks detail or depth
-  "logical_error"     — contains a factual mistake or flawed reasoning
-  "format_error"      — output is malformed, truncated, or wrong structure
-  "missing_data"      — the information genuinely does not exist in the knowledge base
-                        (e.g. answer says "not found", "no data available", "unknown")
-  "unknown"           — cannot determine; answer is near-perfect
+  "specificity"        — too generic for the downstream consumer (missing exact tools, parameters, entities)
+  "coverage"           — required parts of the question or fields the consumer needs are missing
+  "relevance"          — drifted away from the question's objective
+  "knowledge_boundary" — the information is not available to the agent and rephrasing will not help
+                         (e.g. answer says "not found", "no data available")
+  "format_error"       — output is malformed, truncated, or wrong structure
+  "unknown"            — cannot determine; answer is near-perfect
 
 Output ONLY valid JSON — no prose, no markdown:
 {{"completeness": <int>, "depth": <int>, "accuracy": <int>, "clarity": <int>,
-  "failure_mode": "<one of the five strings above>",
+  "failure_mode": "<one of the six strings above>",
   "reasoning": "<one sentence explaining the primary weakness>"}}
 
 Question: {question}
+Downstream consumers of this answer: {downstream}
 Answer: {answer}
 """.strip()
 
@@ -332,9 +359,14 @@ async def _llm_judge(
     question: str,
     answer: str,
     model: genai.GenerativeModel,
+    downstream: Optional[List[str]] = None,
 ) -> Tuple[float, str, FailureMode]:
     """
     Score an answer with an LLM judge.
+
+    `downstream` holds the queries of the DAG nodes that consume this answer,
+    i.e. the downstream role specification Q(i -> j) from the paper. A leaf
+    node's consumer is the final synthesis step.
 
     Returns
     ───────
@@ -353,14 +385,15 @@ async def _llm_judge(
         - Criteria weights are biased toward Completeness and Depth, which
           matter most for adaptive depth decisions.
     """
-    prompt = _JUDGE_PROMPT.format(question=question, answer=answer)
+    consumers = "; ".join(q for q in (downstream or []) if q) or "the final answer synthesis for the user's query"
+    prompt = _JUDGE_PROMPT.format(question=question, answer=answer, downstream=consumers)
     try:
         res = await asyncio.wait_for(
             asyncio.to_thread(model.generate_content, prompt),
             timeout=_JUDGE_TIMEOUT_S,
         )
         text = res.text.replace("```json", "").replace("```", "").strip()
-        raw = json.loads(text)
+        raw = genai.parse_json(text)
 
         score = sum(
             raw.get(k, 5) * w for k, w in _JUDGE_WEIGHTS.items()
@@ -449,8 +482,9 @@ async def _make_branch_tasks(parent: GoTNode, model: Optional[genai.GenerativeMo
     Reason for failure: {parent.failure_mode}
     Failure Critique: {parent.judge_reasoning}
     Query: "{base}"
-    
+
     Please decompose this query into up to {n_branches} distinct sub-queries that will help resolve the failure.
+    {_REPAIR_HINT.get(parent.failure_mode, "")}
     Delegate each sub-query to the most appropriate agent from the registry below.
     
     {config.Config.AGENT_REGISTRY_PROMPT}
@@ -464,7 +498,7 @@ async def _make_branch_tasks(parent: GoTNode, model: Optional[genai.GenerativeMo
     try:
         res = await asyncio.wait_for(asyncio.to_thread(model.generate_content, prompt), timeout=15)
         text = res.text.replace("```json", "").replace("```", "").strip()
-        data = json.loads(text)
+        data = genai.parse_json(text)
         tasks = []
         for i, item in enumerate(data):
             tasks.append(TaskNode(
@@ -885,7 +919,9 @@ class AdaptiveGoTDAG:
             if unjudged:
                 if model is not None:
                     judge_results = await asyncio.gather(*[
-                        _llm_judge(n.task.query, n.result or "", model)
+                        _llm_judge(n.task.query, n.result or "", model,
+                                   downstream=[m.task.query for m in self._nodes.values()
+                                               if n.node_id in m.parent_ids])
                         for n in unjudged
                     ])
                     for node, (score, reason, failure_mode) in zip(unjudged, judge_results):
@@ -940,10 +976,13 @@ class AdaptiveGoTDAG:
                 break
 
             # ── Select nodes for expansion ────────────────────────────────────
+            # A knowledge-boundary failure cannot be fixed by reformulation, so
+            # it is not expanded; it is surfaced as low-confidence instead.
             candidates = [
                 n for n in self._nodes.values()
                 if n.is_executed and not n.is_expanded
                 and (n.quality_score or 0.0) < self.quality_threshold
+                and (n.failure_mode is None or n.failure_mode in _EXPANDABLE_MODES)
             ]
             to_expand = self._prune_to_beam(candidates, budget)
 
@@ -1056,6 +1095,21 @@ class AdaptiveGoTOrchestrator:
         self.max_expansions = max_expansions
         self.depth_budget = depth_budget or DepthBudget()
         self._dag: Optional[AdaptiveGoTDAG] = None
+
+    def low_confidence_nodes(self) -> List[GoTNode]:
+        """Executed, judged nodes still below tau whose repair (if any) never
+        produced a child at or above tau."""
+        if not self._dag:
+            return []
+        nodes = self._dag._nodes
+
+        def repaired(n: GoTNode) -> bool:
+            return any((nodes[c].quality_score or 0.0) >= self.quality_threshold or repaired(nodes[c])
+                       for c in n.children_ids if c in nodes)
+
+        return [n for n in nodes.values()
+                if n.is_executed and n.quality_score is not None
+                and n.quality_score < self.quality_threshold and not repaired(n)]
 
     async def run(
         self,

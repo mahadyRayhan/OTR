@@ -1,5 +1,7 @@
 # HPC Storage, Interconnect, and MPI Standards
 
+Provenance: author-written guidance without cited sources. Prefer the sourced files (aws_ec2_catalog_*.md, sourced_tool_requirements.md) when they disagree.
+
 ## Shared File System for Multi-Node HPC (Amazon FSx for Lustre)
 - **Why Required:** Multi-node MPI jobs need a shared POSIX file system every rank can read and write. S3 alone is insufficient — it is not POSIX and cannot back a running MPI job's scratch directory.
 - **What It Provides:** FSx for Lustre is POSIX-compliant with read-after-write consistency and file locking, delivering sub-millisecond latencies, up to multiple TBps of throughput, and up to millions of IOPS.
