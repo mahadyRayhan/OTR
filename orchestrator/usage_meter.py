@@ -29,12 +29,15 @@ _installed = False
 _by_model: dict[str, dict[str, int]] = defaultdict(lambda: {"calls": 0, "input_tokens": 0, "output_tokens": 0})
 
 
-def _record(model: str, input_tokens: int | None, output_tokens: int | None) -> None:
+def _record(model: str, input_tokens: int | None, output_tokens: int | None, prompt=None) -> None:
     with _lock:
         m = _by_model[model or "unknown"]
         m["calls"] += 1
         m["input_tokens"] += int(input_tokens or 0)
         m["output_tokens"] += int(output_tokens or 0)
+    # Also attribute the call to the node that made it, when a run is being traced.
+    from orchestrator import trace
+    trace.record_llm_call(model or "unknown", input_tokens, output_tokens, prompt if isinstance(prompt, str) else None)
 
 
 def _gemini_usage(response) -> tuple[int, int]:
@@ -67,7 +70,7 @@ def install() -> None:
 
         def generate_content(self, *args, **kwargs):
             resp = orig(self, *args, **kwargs)
-            _record(getattr(self, "model_name", "gemini"), *_gemini_usage(resp))
+            _record(getattr(self, "model_name", "gemini"), *_gemini_usage(resp), args[0] if args else kwargs.get("contents"))
             return resp
 
         legacy.GenerativeModel.generate_content = generate_content
@@ -82,12 +85,12 @@ def install() -> None:
 
         def sync_gc(self, *args, **kwargs):
             resp = orig_sync(self, *args, **kwargs)
-            _record(str(kwargs.get("model", "gemini")), *_gemini_usage(resp))
+            _record(str(kwargs.get("model", "gemini")), *_gemini_usage(resp), kwargs.get("contents"))
             return resp
 
         async def async_gc(self, *args, **kwargs):
             resp = await orig_async(self, *args, **kwargs)
-            _record(str(kwargs.get("model", "gemini")), *_gemini_usage(resp))
+            _record(str(kwargs.get("model", "gemini")), *_gemini_usage(resp), kwargs.get("contents"))
             return resp
 
         gmodels.Models.generate_content = sync_gc

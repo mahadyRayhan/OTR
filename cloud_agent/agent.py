@@ -4,6 +4,7 @@ import csv
 import re
 import chromadb
 import gemini_client as genai
+from orchestrator import trace
 from orchestrator.context_format import entities, task_text
 
 # GEMINI_MODEL = "gemini-flash-latest"
@@ -26,7 +27,10 @@ def _query_vector_db(query: str, n_results: int = 4) -> str:
         sentence_transformer_ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
         collection = client.get_collection(name="cloud_architecture_vault", embedding_function=sentence_transformer_ef)
         results = collection.query(query_texts=[query], n_results=n_results)
-        
+        trace.record_retrieval("cloud_index", query, [
+            {"id": i, "title": m.get("source", ""), "distance": round(float(d), 4)}
+            for i, m, d in zip(results["ids"][0], results["metadatas"][0], results.get("distances", [[0] * 99])[0])])
+
         retrieved_text = ""
         for i, doc in enumerate(results['documents'][0]):
             source = results['metadatas'][0][i]['source']

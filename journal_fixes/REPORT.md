@@ -153,7 +153,7 @@ Fixes, in order:
 | The planner wrote goals to execute scripts and to re-fetch data the question gives | Planner rules: agents cannot run code; a computation on given data is one goal, routed to the code agent, which adds a hand-worked result after the script. |
 | Gold DOIs | Preprint golds accept the published version, and published golds accept their preprint versions (bioRxiv/medRxiv API, Crossref; 126 items gained one). Items whose only gold is a software archive were dropped (5 per set). Log: `<set>.refine_log.json`. |
 
-BioCoder harness (`biocoder_eval.py`, image `journal_fixes/biocoder_docker`): a re-implementation of BioCoder's fuzz test. Each item's context file has random inputs filled in five times, and an answer passes if its output matches the golden function's output every time. Runs have no network, a read-only file system except `/tmp`, 1 CPU, 2 GB and 30 s each. Self-test on all 86 items: the golden function passes on 84 and a wrong function fails on all 86. On the other 2 (test split) the golden code crashes on its own fuzzed input; they count as unscorable, not wrong. Dropped 8 items whose prompt names a different function from the one the test calls (86 to 78; `code_biocoder.refine_log.json`).
+BioCoder harness (`biocoder_eval.py`, image `docker/sandbox`, shared with `orchestrator/sandbox.py`): a re-implementation of BioCoder's fuzz test. Each item's context file has random inputs filled in five times, and an answer passes if its output matches the golden function's output every time. Runs have no network, a read-only file system except `/tmp`, 1 CPU, 2 GB and 30 s each. Self-test on all 86 items: the golden function passes on 84 and a wrong function fails on all 86. On the other 2 (test split) the golden code crashes on its own fuzzed input; they count as unscorable, not wrong. Dropped 8 items whose prompt names a different function from the one the test calls (86 to 78; `code_biocoder.refine_log.json`).
 
 Results:
 
@@ -172,6 +172,23 @@ Remaining limits:
 1. **Cloud sizing varies between runs.** The same tool was sized 12/72, 8/16 and 8/32 in three runs, so cloud and full-system scores move by about one item per five between runs. The nf-core labels have a low ceiling (problem 2).
 2. **SeqQA.** The sequence now reaches the agents, but tracing a 1,000-base sequence by hand is unreliable. In one item the first agent found the right count and the code agent's trace replaced it with sites that do not exist. Without execution there is no general fix. Report SeqQA separately as a limitation.
 3. **BioCoder** failures are shared by both systems. The summary prompts omit details that the tests check (e.g. clipping at 1.0, a custom input class). The code agent neither helps nor hurts here.
+
+## Shared core (2026-11-08, branch `shared-core-Sciweaver`)
+
+Built once and used by both follow-up branches: the journal paper (C1-C6) and the D1 conference paper. Default behaviour is unchanged: the cugcr policy is the old context routing, and the cache is off.
+
+| Part | Files | What it does |
+| --- | --- | --- |
+| S1 Run trace | `orchestrator/trace.py`, engine and agent hooks | One JSON file per run in `~/otr_local/traces`. For every node it records the task, the exact agent input, the atoms offered and passed on its incoming edge, retrievals, LLM calls (judge calls under `<node>/judge`), tool calls, output, judge score and time. Also the decomposition, the first-pass answer and the retries |
+| S2 Replay and cache | `orchestrator/replay.py`, `orchestrator/llm_cache.py` | `SCIWEAVER_LLM_CACHE=1` caches every Gemini call and every live paper search. `replay()` reruns a recorded DAG with changed node outputs or inputs. Checked: an unchanged replay gives the identical answer with 15 of 15 calls from the cache; overriding one node changes only its 9 descendants |
+| S3 Context layer | `orchestrator/context_layer.py` | Typed atoms: code, entity, prose, CONSTRAINT (protected), ARTIFACT (passed by pointer), sensitive flag. Policies `none`, `raw`, `cugcr`; a branch adds its own with `@register_policy`. `route_context()` records each edge in the trace |
+| S4 Sandbox and lookups | `orchestrator/sandbox.py`, `orchestrator/lookups.py`, `docker/sandbox/` | Model-written Python runs in Docker with no network, a read-only file system except `/tmp`, 1 CPU, 1 GB and a time limit. NCBI E-utilities and remote BLAST run on the host, rate-limited, cached and traced. The BioCoder harness uses the same image |
+| S5 Evaluation | `scoring.py`, `run_pilot.py`, `build_geneturing.py` | 95% bootstrap intervals; paired differences with a sign test; `--set KEY=VALUE` overrides for ablations (`CONTEXT_POLICY`, `ATTACH_REQUEST`, and later per-branch switches); a new set `lookup_geneturing` (500 items, GeneGPT's scoring rules) |
+| S6 Baselines | `run_pilot.py --systems` | `sciweaver`, `react` (same agents, linear, raw context), `gemini`, `strong` (`gemini-3.5-flash`), `self_consistency` (5 samples, majority vote). Every system's cost is recorded |
+
+Tests: `journal_fixes/scripts/test_shared_core.py [--online]` (offline, plus sandbox when Docker runs and NCBI with `--online`) and `test_replay_live.py <trace>`.
+
+Not done: LAB-Bench2 (SeqQA2 and LitQA3) is gated on Hugging Face (`EdisonScientific/labbench2`, CC BY-SA 4.0). It needs the account owner to accept its terms.
 
 ## Part 1 results (2026-11-05): re-judging the stored answers
 

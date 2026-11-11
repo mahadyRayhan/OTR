@@ -71,7 +71,7 @@ AVAILABLE AGENTS & CAPABILITIES:
    FROM a specific named paper, tool, or document.
    - Feature: You MUST append a reasoning strategy to the query.
      - If query asks for a single fact -> append "--strategy=cot"
-     - If query asks to verify a claim -> append "--strategy=react"
+     - If query asks to verify a claim -> append "--strategy=cot"
      - If query is open-ended or asks for multiple items -> append "--strategy=tot"
      - If query asks to compare distinct concepts -> append "--strategy=got"
 2. "scholar" - Use ONLY for SEARCHING for actual human experts, researchers, citations, or collaborators.

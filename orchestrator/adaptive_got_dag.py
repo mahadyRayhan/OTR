@@ -77,6 +77,7 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import gemini_client as genai
 import config
+from orchestrator import trace
 
 # ── import sibling modules (or stub if running standalone) ────────────────────
 try:
@@ -918,12 +919,17 @@ class AdaptiveGoTDAG:
                         if n.is_executed and n.quality_score is None]
             if unjudged:
                 if model is not None:
-                    judge_results = await asyncio.gather(*[
-                        _llm_judge(n.task.query, n.result or "", model,
-                                   downstream=[m.task.query for m in self._nodes.values()
-                                               if n.node_id in m.parent_ids])
-                        for n in unjudged
-                    ])
+                    async def judged(n: GoTNode):
+                        # The judge's LLM calls are recorded under "<node>/judge" in the run trace.
+                        tok = trace.enter_node(f"{n.node_id}/judge", op="judge", judged=n.node_id)
+                        try:
+                            return await _llm_judge(n.task.query, n.result or "", model,
+                                                    downstream=[m.task.query for m in self._nodes.values()
+                                                                if n.node_id in m.parent_ids])
+                        finally:
+                            trace.exit_node(tok)
+
+                    judge_results = await asyncio.gather(*[judged(n) for n in unjudged])
                     for node, (score, reason, failure_mode) in zip(unjudged, judge_results):
                         node.quality_score = score
                         node.failure_mode = failure_mode

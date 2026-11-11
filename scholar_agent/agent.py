@@ -18,6 +18,7 @@ from typing import Optional, List, Dict, Any
 from scholar_agent import domains as _domains
 from scholar_agent.domains import DEFAULT_DOMAIN
 from scholar_agent.intent import is_paper_lookup
+from orchestrator import llm_cache, trace
 
 # Minimum cosine similarity for a cached author to be accepted as an expert.
 # Without this floor, ChromaDB's nearest-neighbour search always returns its
@@ -678,7 +679,8 @@ class ScholarAgent:
                 break
 
             print(f"   [ScholarAgent] API Pass {attempt + 1}/{len(api_sequence)}: '{current_topic}'")
-            papers = await self.provider.search_papers(current_topic, limit=150)
+            papers = await llm_cache.memo_async("s2_papers", [current_topic, 150], self.provider.search_papers,
+                                                current_topic, limit=150)
 
             # Drop News and Editorials
             valid_papers = [
@@ -859,7 +861,8 @@ async def find_paper(user_input: str, llm, depth: int = 1) -> str:
         queries = [user_input[:200]]
     seen, candidates = set(), []
     for phrase in _quoted_phrases(user_input):  # exact-phrase hits first: they contain the quoted text
-        for p in await asyncio.to_thread(_europepmc_search, f'"{phrase}"', 5):
+        for p in await asyncio.to_thread(llm_cache.memo, "europepmc", [f'"{phrase}"', 5], _europepmc_search,
+                                         f'"{phrase}"', 5):
             key = (p.doi or p.id or p.title).lower()
             if key and key not in seen:
                 seen.add(key)
@@ -867,16 +870,20 @@ async def find_paper(user_input: str, llm, depth: int = 1) -> str:
                 candidates.append(p)
     for q in queries:  # Semantic Scholar and Europe PMC; the same paper from both is kept once (by DOI)
         try:
-            found = await agent_instance.provider.search_papers(str(q), limit=10)
+            found = await llm_cache.memo_async("s2_papers", [str(q), 10], agent_instance.provider.search_papers,
+                                               str(q), limit=10)
         except Exception:
             found = []
-        found += await asyncio.to_thread(_europepmc_search, str(q), 10)
+        found = list(found) + await asyncio.to_thread(llm_cache.memo, "europepmc", [str(q), 10], _europepmc_search,
+                                                      str(q), 10)
         for p in found:
             key = (p.doi or p.id or p.title).lower()
             if key and key not in seen:
                 seen.add(key)
                 candidates.append(p)
     print(f"   [Paper mode] queries={queries} | {len(candidates)} candidates")
+    trace.record_retrieval("paper_search", "; ".join(queries), [
+        {"id": p.doi or p.id, "title": p.title, "year": p.year} for p in candidates[:25]])
     if not candidates:
         return "[STRUCTURAL_FAIL: 0 papers retrieved]\n[Scholar Agent - Paper Search] No candidate papers found."
     listing = "\n".join(

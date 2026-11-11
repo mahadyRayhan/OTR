@@ -17,8 +17,9 @@ from typing import Dict, Any, List
 import time
 
 import config
-from . import usage_meter
+from . import llm_cache, usage_meter
 usage_meter.install()
+llm_cache.install_from_env()  # opt-in (SCIWEAVER_LLM_CACHE); after the meter, so cache hits cost nothing
 from .decomposers import DecomposerRegistry, AutoDecomposerSelector
 from .dag_builders import DAGRegistry
 from .evaluation.communication_log import comm_tracker
@@ -27,6 +28,8 @@ from .evaluation.communication_log import comm_tracker
 # Import the GoT Classes
 from .adaptive_got_dag import AdaptiveGoTOrchestrator, GoTNode, DepthBudget, GoTOp
 from .context_format import with_request
+from . import trace
+from .context_layer import ArtifactStore, policy_for_mode, route_context
 
 # 🚀 CORRECTED IMPORTS: Pointing to the specific agent folders
 from rag_agent.knowledge_base import KnowledgeBase
@@ -51,62 +54,8 @@ try:
 except ImportError:
     pass
 
-# ── Entity stopwords for atomizer ─────────────────────────────────────────────
-# NLTK English stopwords (title-cased) + domain-generic academic/bio terms that
-# match the [A-Z][a-z]{4,} pattern but are not named entities.
-def _build_entity_stopwords() -> frozenset:
-    base: set[str] = set()
-    try:
-        import nltk
-        from nltk.corpus import stopwords as _sw
-        base = {w.title() for w in _sw.words("english")}
-    except Exception:
-        pass
-    # Generic academic/bioinformatics prose words NLTK doesn't cover.
-    # Expanded after observing false positives in telemetry (Local, Source, Solution…).
-    extra = {
-        # discourse / hedge words
-        "Crucially", "Importantly", "Notably", "Particularly", "Essentially",
-        "Specifically", "Generally", "Typically", "Commonly", "Frequently",
-        "Paradoxically", "Conversely", "Similarly", "Consequently",
-        # generic academic nouns
-        "Refinement", "Improvement", "Detection", "Analysis", "Method",
-        "Algorithm", "Approach", "Framework", "Process", "System",
-        "Result", "Output", "Input", "Data", "Value", "Answer", "Paper",
-        "Study", "Figure", "Table", "Section", "Example", "Step",
-        "Performance", "Comparison", "Discussion", "Introduction",
-        "Conclusion", "Abstract", "Source", "Solution", "Problem",
-        "Challenge", "Phase", "Stage", "Version", "Component", "Module",
-        "Structure", "Parameter", "Property", "Feature", "Factor", "Element",
-        "Mechanism", "Strategy", "Technique", "Procedure", "Operation",
-        # graph / math nouns (not tool names)
-        "Communities", "Community", "Network", "Nodes", "Edges",
-        "Graph", "Matrix", "Vector", "Score", "Partition", "Cluster",
-        "Subgraph", "Connectivity", "Modularity", "Resolution",
-        # generic adjectives that open sentences
-        "Local", "Global", "Total", "Single", "Entire", "Original",
-        "Novel", "Previous", "Current", "Recent", "Basic", "Advanced",
-        "Standard", "Simple", "Complex", "Initial", "Final", "Primary",
-        "Secondary", "Internal", "External", "Optimal", "Efficient",
-        # verb-derived nouns / gerunds that start sentences
-        "Moving", "Building", "Ensuring", "Computing", "Running",
-        "Loading", "Saving", "Performing", "Generating", "Creating",
-        "Based", "Using", "Given", "Through", "Across", "Along",
-    }
-    return frozenset(base | extra)
-
-_ENTITY_STOPWORDS: frozenset = _build_entity_stopwords()
-
-class AtomType(Enum):
-    CODE_BLOCK = "code"
-    NAMED_ENTITY = "entity"
-    PROSE_CLAIM = "prose"
-
-@dataclass
-class ContextAtom:
-    type: AtomType
-    content: str
-    is_protected: bool
+# Atom types and the atomizer live in context_layer.py (shared with the context policies).
+from .context_layer import AtomType, ContextAtom, atomize_output  # noqa: E402
 
 # =========================================================
 # 🚀 CUGCR DEPENDENCY MANIFESTS (Tightened for Benchmark)
@@ -249,43 +198,6 @@ _PLACEHOLDER_RE = re.compile(
     re.IGNORECASE,
 )
 
-def atomize_output(raw_output: str) -> list[ContextAtom]:
-    """Extracts protected code, biological entities, and prose deterministically."""
-    atoms = []
-
-    for match in re.finditer(r'```[\s\S]*?```', raw_output):
-        atoms.append(ContextAtom(AtomType.CODE_BLOCK, match.group(), is_protected=True))
-
-    prose_only = re.sub(r'```[\s\S]*?```', '', raw_output)
-    # Strip markdown headers — words in "## Building Well-Connected Communities"
-    # are structural section titles, not named entities. Without this, every
-    # capitalized header word (Building, Source, Refined) becomes a false-positive entity.
-    prose_only = re.sub(r'^#{1,6}\s+.*$', '', prose_only, flags=re.MULTILINE)
-    # Strip bold/italic markers but keep the text (bold terms may be real entities)
-    prose_only = re.sub(r'\*{1,3}', '', prose_only)
-
-    bio_pattern = (
-        r'\b('
-        r'[A-Z]{2,}[0-9]*'              # all-caps acronyms: RNA, STAR, CRISPR
-        r'|[A-Z][a-z]+[A-Z]\w*'         # CamelCase: Scanpy, AnnData, SAMtools
-        r'|[A-Z]{2,}[a-z]+\w*'          # mixed start: DESeq2, HISAT2, BWA
-        r'|[A-Z][a-z]+-\d+'             # hyphen-digit: Leiden-1
-        r'|[A-Z][a-z]{4,}'              # long proper nouns ≥6 chars: Leiden, Louvain, Kallisto
-        r')\b'
-    )
-    seen_entities: set[str] = set()
-    for match in re.finditer(bio_pattern, prose_only):
-        ent = match.group()
-        if ent not in seen_entities and ent.title() not in _ENTITY_STOPWORDS:
-            seen_entities.add(ent)
-            atoms.append(ContextAtom(AtomType.NAMED_ENTITY, ent, is_protected=True))
-
-    for sentence in prose_only.split('. '):
-        if len(sentence.strip()) > 15:
-            atoms.append(ContextAtom(AtomType.PROSE_CLAIM, sentence.strip() + ".", is_protected=False))
-
-    return atoms
-
 def build_rigid_prompt(original_query: str, raw_context: str, token_budget: int = 400, downstream_agent: str = "rag") -> str:
     """Filters atoms and injects them into a rigid, drift-proof template, filling up to token_budget."""
     atoms = atomize_output(raw_context)
@@ -293,7 +205,7 @@ def build_rigid_prompt(original_query: str, raw_context: str, token_budget: int 
     valid_atoms = [a for a in atoms if a.type in manifest.required_atom_types]
 
     code_blocks = [a.content for a in valid_atoms if a.type == AtomType.CODE_BLOCK]
-    entities    = list(set([a.content for a in valid_atoms if a.type == AtomType.NAMED_ENTITY]))
+    entities    = list(dict.fromkeys(a.content for a in valid_atoms if a.type == AtomType.NAMED_ENTITY))  # ordered: same prompt every run
     prose       = [a.content for a in valid_atoms if a.type == AtomType.PROSE_CLAIM]
 
     used_tokens   = 0
@@ -330,6 +242,15 @@ def build_rigid_prompt(original_query: str, raw_context: str, token_budget: int 
 ## Your Task
 {original_query}
 """
+
+def _config_snapshot() -> dict:
+    """The run's settings (upper-case Config attributes with plain values), for the trace."""
+    snap = {k: v for k, v in vars(config.Config).items()
+            if k.isupper() and isinstance(v, (str, int, float, bool, type(None)))}
+    # Agents read their indexes from here at import time; a replay must use the same ones.
+    snap["SCIWEAVER_INDEX_DIR"] = os.environ.get("SCIWEAVER_INDEX_DIR")
+    return snap
+
 
 class OrchestratorEngine:
     def __init__(self):
@@ -464,6 +385,8 @@ class OrchestratorEngine:
         agent_registry = config.Config.AGENT_REGISTRY_PROMPT
         strategy_match = re.search(r'--strategy=(\w+)', query.lower())
         strategy = strategy_match.group(1) if strategy_match else "cot"
+        if strategy not in ("cot", "tot", "got"):  # the RAG agent's strategies; planners sometimes invent others
+            strategy = "cot"
         clean_query = re.sub(r'--strategy=\w+', '', query).strip()
         _depth_override = config.Config.DEFAULT_DEPTH
         if _depth_override is not None:
@@ -478,13 +401,22 @@ class OrchestratorEngine:
         # Scholar is API-driven; instruction text would be ignored.
         # Goals refer to data the request gives ("the provided sequence", "options A-D"); pass it along.
         # Scholar searches with its query text and gets the request itself for paper lookups.
-        if agent_name != "scholar":
+        if agent_name != "scholar" and getattr(config.Config, "ATTACH_REQUEST", True):
             clean_query = with_request(clean_query, getattr(self, "_user_query", ""))
 
         depth_instr = self._depth_instruction(agent_name)
         if depth_instr and agent_name != "scholar":
             clean_query = f"{clean_query}\n\n[DEPTH REQUIREMENT]: {depth_instr}"
+        trace.record_node(agent_input=clean_query, strategy=strategy, depth=depth)
+        return await self._dispatch_agent(agent_name, clean_query, strategy, depth, meta)
 
+    async def _dispatch_agent(self, agent_name: str, clean_query: str, strategy: str, depth: int,
+                              meta: dict | None = None) -> tuple[str, dict]:
+        """Call one agent with its final input (request, depth instruction and context already added)."""
+        agent_registry = config.Config.AGENT_REGISTRY_PROMPT
+        active_domain = getattr(self, "_active_domain", None) or config.Config.ACTIVE_DOMAIN
+        meta = meta if meta is not None else {"agent": agent_name, "strategy": strategy, "depth": depth,
+                                              "domain": active_domain}
         try:
             if agent_name == "code":
                 result, agent_tokens = await call_code_agent(clean_query, strategy, depth, agent_registry)
@@ -607,7 +539,7 @@ class OrchestratorEngine:
                 selected_atoms = self._score_and_select_atoms(atoms, scoring_query, downstream_agent)
 
                 code_blocks = [a.content for a in selected_atoms if a.type == AtomType.CODE_BLOCK]
-                entities    = list(set([a.content for a in selected_atoms if a.type == AtomType.NAMED_ENTITY]))
+                entities    = list(dict.fromkeys(a.content for a in selected_atoms if a.type == AtomType.NAMED_ENTITY))
                 prose       = [a.content for a in selected_atoms if a.type == AtomType.PROSE_CLAIM]
 
                 context_block = ""
@@ -696,6 +628,125 @@ class OrchestratorEngine:
     
         return sanitized
 
+    async def _synthesize(self, user_input: str, outputs: list, style_guideline: str = "", orchestrator_tokens: dict | None = None) -> str:
+        """Final answer to the user's query from the agent outputs, in the format the query asks for."""
+        full_context = "\n\n".join([f"--- Source {i+1} ---\n{o}" for i, o in enumerate(outputs)])
+        agg_prompt = f"""
+        Synthesize a final response to the user's original query using ONLY these outputs:
+        User's Original Query: "{user_input}"
+        Agent Outputs:
+        {full_context}
+        {style_guideline}
+
+        Copy identifiers (DOIs, accession numbers, commands, instance types) exactly as they appear
+        in the agent outputs; never invent one. Where outputs disagree, prefer the one an agent marks
+        as verified against a source (a paper search result, a CATALOG-VERIFIED instance).
+
+        If the user's original query specifies an output format (for example a required final
+        line or a JSON object), your response must follow it exactly.
+        """
+        res = await asyncio.to_thread(self.llm.generate_content, agg_prompt.strip())
+        if orchestrator_tokens is not None and getattr(res, "usage_metadata", None):
+            orchestrator_tokens["input"]  += getattr(res.usage_metadata, "prompt_token_count", 0) or 0
+            orchestrator_tokens["output"] += getattr(res.usage_metadata, "candidates_token_count", 0) or 0
+        return res.text.strip()
+
+    async def _execute_node(self, node, parent_nodes: list, ablation_mode: str, policy: str, user_input: str,
+                            synthesize, wave: int = 1) -> str:
+        """One DAG node: AGGREGATE synthesises its parents, REFINE retries with a reflection, any other op
+        routes the parents' outputs through the context policy and calls its agent. Shared by the GoT run
+        and replay.py, so a replayed node is built exactly as in the run."""
+        query = node.task.query
+
+        if node.op == GoTOp.AGGREGATE:
+            print(f"      [GoT Operator] Safe Processing for AGGREGATE node...")
+            real_parents = [p for p in parent_nodes if p.result]
+            return await synthesize([p.result for p in real_parents])
+
+        if node.op == GoTOp.REFINE:
+            print(f"      [GoT Operator] Safe Processing for REFINE node with Reflexion...")
+            if ablation_mode == "none":
+                result, _ = await self._execute_agent(node.task.agent, query, depth=node.depth)
+                return result
+
+            previous_answer = parent_nodes[0].result if parent_nodes else "No previous answer recorded."
+            original_query = parent_nodes[0].task.query if parent_nodes else query
+
+            refine_prompt = f"""
+            ## ⚠ Retry Attempt Required for Agent: {node.task.agent.upper()}
+            ### Original Task:
+            {original_query}
+            ### Your Previous Failed Attempt:
+            {previous_answer}
+            ### Judge's Critique:
+            {node.judge_reasoning}
+
+            ### CRITICAL INSTRUCTION:
+            1. Write a <reflection> block analyzing your mistake.
+            2. Write a <revised_query> that will be sent to the {node.task.agent.upper()} agent to try again.
+               IMPORTANT: If the original task asked for a specific number of items (like 2 experts, 3 papers), your revised query MUST explicitly include that exact number (e.g., "Find 2 experts in...").
+
+            Format:
+            <reflection>
+            ...
+            </reflection>
+            <revised_query>
+            ...
+            </revised_query>
+            """
+            res = await asyncio.to_thread(self.llm.generate_content, refine_prompt.strip())
+
+            revised_query = original_query
+            match = re.search(r'<revised_query>(.*?)</revised_query>', res.text, re.DOTALL)
+            if match:
+                revised_query = match.group(1).strip()
+
+            print(f"      [Reflexion] Revised Query: {revised_query[:60]}...")
+            full_query_to_agent = f"{revised_query}\n\n[Previous Attempt Reflection]:\n{res.text.strip()}"
+            result, _ = await self._execute_agent(node.task.agent, full_query_to_agent, depth=node.depth)
+            return result
+
+        node_cugcr = False
+        node_crs   = self._last_preliminary_crs
+        if node.parent_ids and node.op not in (GoTOp.AGGREGATE, GoTOp.REFINE):
+            prev_results = {p.node_id: p.result for p in parent_nodes if p.result}
+            resolved_query = await route_context(self, policy, query, node.task.agent, prev_results,
+                                                 user_query=user_input, store=getattr(self, "_artifacts", None))
+            node_cugcr = self._last_cugcr_triggered
+            node_crs   = self._last_preliminary_crs
+
+            injected_text = resolved_query.replace(query, "").strip()
+            current_wave = wave
+            comm_tracker.log_injection(
+                wave=current_wave,
+                from_ids=node.parent_ids,
+                to_id=node.node_id,
+                to_agent=node.task.agent,
+                context=injected_text,
+                orig_query=query,
+                resolved_query=resolved_query,
+                low_confidence=(ablation_mode == "adaptive" and self._last_preliminary_crs < 0.15)
+            )
+            query = resolved_query
+
+        query = self._sanitize_placeholders(query, parent_nodes)
+
+        _exec_t0 = time.monotonic()
+        print(f"      [Executing] Node {node.node_id[:4]} ({node.task.agent.upper()}): {query[:60]}...")
+        result, agent_meta = await self._execute_agent(node.task.agent, query, depth=node.depth)
+        print(f"      [Done]      Node {node.node_id[:4]} ({node.task.agent.upper()}) ← {time.monotonic()-_exec_t0:.1f}s")
+
+        self._node_metadata[node.node_id] = {
+            **agent_meta,
+            "cugcr_triggered": node_cugcr,
+            "preliminary_crs": round(node_crs, 3),
+        }
+
+        if node.parent_ids and node.op not in (GoTOp.AGGREGATE, GoTOp.REFINE):
+            comm_tracker.update_result(to_id=node.node_id, output=result, quality=0.0)
+
+        return result
+
     async def decompose_only(self, user_input: str) -> tuple:
         """Decompose the query once and return (tasks, decomposer_name).
 
@@ -783,7 +834,13 @@ class OrchestratorEngine:
 
             t0 = time.monotonic()
             print(f"      [Linear] Task {task.id} [{task.agent.upper()}]: {task.query[:60]}...")
-            result, agent_meta = await self._execute_agent(task.agent, agent_query, depth=1)
+            _tok = trace.enter_node(str(task.id), agent=task.agent, op="root", task=task.query,
+                                    parents=[str(d) for d in (task.depends_on or [])])
+            try:
+                result, agent_meta = await self._execute_agent(task.agent, agent_query, depth=1)
+                trace.record_node(output=result)
+            finally:
+                trace.exit_node(_tok)
             elapsed = round(time.monotonic() - t0, 2)
             print(f"      [Done]   Task {task.id} [{task.agent.upper()}] ← {elapsed}s")
 
@@ -843,7 +900,11 @@ class OrchestratorEngine:
         self.current_run_cugcr_triggered = False
         self._node_metadata = {}
         self._user_query = user_input  # read by _execute_agent
+        self._artifacts = ArtifactStore()  # large upstream outputs of this run, passed by pointer
         usage_meter.reset()
+        _policy = getattr(config.Config, "CONTEXT_POLICY", None) or policy_for_mode(ablation_mode)
+        trace.start_run(user_input, {**_config_snapshot(), "ablation_mode": ablation_mode,
+                                     "decomposer": decomposer_name, "context_policy": _policy})
         low_conf_note = ""
 
         profiler_t0 = time.monotonic()
@@ -883,6 +944,9 @@ class OrchestratorEngine:
             deps_str = f" (Depends on: {t.depends_on})" if t.depends_on else ""
             print(f"      Task {t.id} -> [{t.agent.upper()}]: '{t.query}'{deps_str}")
 
+        trace.event("decomposition", decomposer=decomposer_name, latency_ms=decomposer_latency_ms,
+                    tasks=[{"id": t.id, "agent": t.agent, "query": t.query, "depends_on": t.depends_on,
+                            "qdmr_op": getattr(t, "qdmr_op", None)} for t in tasks])
         dag_dict = self.dag_builder.build(tasks)
         results = {}
         profiler_latency_ms = None
@@ -952,119 +1016,22 @@ class OrchestratorEngine:
             )
 
             async def synthesize(outputs: list) -> str:
-                """Final answer to the user's query from the agent outputs, in the format the query asks for."""
-                full_context = "\n\n".join([f"--- Source {i+1} ---\n{o}" for i, o in enumerate(outputs)])
-                agg_prompt = f"""
-                Synthesize a final response to the user's original query using ONLY these outputs:
-                User's Original Query: "{user_input}"
-                Agent Outputs:
-                {full_context}
-                {style_guideline}
+                return await self._synthesize(user_input, outputs, style_guideline, orchestrator_tokens)
 
-                Copy identifiers (DOIs, accession numbers, commands, instance types) exactly as they appear
-                in the agent outputs; never invent one. Where outputs disagree, prefer the one an agent marks
-                as verified against a source (a paper search result, a CATALOG-VERIFIED instance).
-
-                If the user's original query specifies an output format (for example a required final
-                line or a JSON object), your response must follow it exactly.
-                """
-                res = await asyncio.to_thread(self.llm.generate_content, agg_prompt.strip())
-                if hasattr(res, "usage_metadata") and res.usage_metadata:
-                    orchestrator_tokens["input"]  += getattr(res.usage_metadata, "prompt_token_count", 0) or 0
-                    orchestrator_tokens["output"] += getattr(res.usage_metadata, "candidates_token_count", 0) or 0
-                return res.text.strip()
+            trace.event("synthesis_style", text=style_guideline)  # replay.py synthesises with the same text
 
             async def got_executor(node: GoTNode) -> str:
-                query = node.task.query
-                parent_nodes = [got_orchestrator.dag._nodes[pid] for pid in node.parent_ids] if got_orchestrator.dag else []
-
-                if node.op == GoTOp.AGGREGATE:
-                    print(f"      [GoT Operator] Safe Processing for AGGREGATE node...")
-                    real_parents = [p for p in parent_nodes if p.result]
-                    return await synthesize([p.result for p in real_parents])
-
-                if node.op == GoTOp.REFINE:
-                    print(f"      [GoT Operator] Safe Processing for REFINE node with Reflexion...")
-                    if ablation_mode == "none":
-                        result, _ = await self._execute_agent(node.task.agent, query, depth=node.depth)
-                        return result
-
-                    previous_answer = parent_nodes[0].result if parent_nodes else "No previous answer recorded."
-                    original_query = parent_nodes[0].task.query if parent_nodes else query
-
-                    refine_prompt = f"""
-                    ## ⚠ Retry Attempt Required for Agent: {node.task.agent.upper()}
-                    ### Original Task:
-                    {original_query}
-                    ### Your Previous Failed Attempt:
-                    {previous_answer}
-                    ### Judge's Critique:
-                    {node.judge_reasoning}
-
-                    ### CRITICAL INSTRUCTION:
-                    1. Write a <reflection> block analyzing your mistake.
-                    2. Write a <revised_query> that will be sent to the {node.task.agent.upper()} agent to try again.
-                       IMPORTANT: If the original task asked for a specific number of items (like 2 experts, 3 papers), your revised query MUST explicitly include that exact number (e.g., "Find 2 experts in...").
-
-                    Format:
-                    <reflection>
-                    ...
-                    </reflection>
-                    <revised_query>
-                    ...
-                    </revised_query>
-                    """
-                    res = await asyncio.to_thread(self.llm.generate_content, refine_prompt.strip())
-
-                    revised_query = original_query
-                    match = re.search(r'<revised_query>(.*?)</revised_query>', res.text, re.DOTALL)
-                    if match:
-                        revised_query = match.group(1).strip()
-
-                    print(f"      [Reflexion] Revised Query: {revised_query[:60]}...")
-                    full_query_to_agent = f"{revised_query}\n\n[Previous Attempt Reflection]:\n{res.text.strip()}"
-                    result, _ = await self._execute_agent(node.task.agent, full_query_to_agent, depth=node.depth)
+                _tok = trace.enter_node(node.node_id, agent=node.task.agent, op=node.op.value, depth=node.depth,
+                                        parents=list(node.parent_ids), task=node.task.query,
+                                        dim=getattr(getattr(node, "dim", None), "value", None))
+                try:
+                    parents = [got_orchestrator.dag._nodes[pid] for pid in node.parent_ids] if got_orchestrator.dag else []
+                    wave = len(got_orchestrator.dag.wave_scores) + 1 if got_orchestrator.dag else 1
+                    result = await self._execute_node(node, parents, ablation_mode, _policy, user_input, synthesize, wave)
+                    trace.record_node(output=result)
                     return result
-
-                node_cugcr = False
-                node_crs   = self._last_preliminary_crs
-                if node.parent_ids and node.op not in (GoTOp.AGGREGATE, GoTOp.REFINE):
-                    prev_results = {p.node_id: p.result for p in parent_nodes if p.result}
-                    resolved_query = await self._resolve_dependencies(query, node.parent_ids, prev_results, ablation_mode, downstream_agent=node.task.agent)
-                    node_cugcr = self._last_cugcr_triggered
-                    node_crs   = self._last_preliminary_crs
-
-                    injected_text = resolved_query.replace(query, "").strip()
-                    current_wave = len(got_orchestrator.dag.wave_scores) + 1 if got_orchestrator.dag else 1
-                    comm_tracker.log_injection(
-                        wave=current_wave,
-                        from_ids=node.parent_ids,
-                        to_id=node.node_id,
-                        to_agent=node.task.agent,
-                        context=injected_text,
-                        orig_query=query,
-                        resolved_query=resolved_query,
-                        low_confidence=(ablation_mode == "adaptive" and self._last_preliminary_crs < 0.15)
-                    )
-                    query = resolved_query
-
-                query = self._sanitize_placeholders(query, parent_nodes)
-
-                _exec_t0 = time.monotonic()
-                print(f"      [Executing] Node {node.node_id[:4]} ({node.task.agent.upper()}): {query[:60]}...")
-                result, agent_meta = await self._execute_agent(node.task.agent, query, depth=node.depth)
-                print(f"      [Done]      Node {node.node_id[:4]} ({node.task.agent.upper()}) ← {time.monotonic()-_exec_t0:.1f}s")
-
-                self._node_metadata[node.node_id] = {
-                    **agent_meta,
-                    "cugcr_triggered": node_cugcr,
-                    "preliminary_crs": round(node_crs, 3),
-                }
-
-                if node.parent_ids and node.op not in (GoTOp.AGGREGATE, GoTOp.REFINE):
-                    comm_tracker.update_result(to_id=node.node_id, output=result, quality=0.0)
-
-                return result
+                finally:
+                    trace.exit_node(_tok)
 
             print("\n   [GoT DAG] Commencing Adaptive Wave Execution...")
             final_answer = await got_orchestrator.run(
@@ -1073,6 +1040,11 @@ class OrchestratorEngine:
                 model=self.llm if config.Config.USE_AGENT_JUDGE else None,
                 agent_executor=got_executor
             )
+            if got_orchestrator.dag:
+                for _n in got_orchestrator.dag._nodes.values():
+                    trace.record_node(_n.node_id, quality=_n.quality_score, judge_critique=_n.judge_reasoning,
+                                      failure_mode=_n.failure_mode.value if _n.failure_mode else None,
+                                      low_confidence=_n in got_orchestrator.low_confidence_nodes())
             # With a single leaf no AGGREGATE node is built and the answer is one agent's raw output;
             # synthesise it too, so the user's question (and any output format it asks for) is answered.
             if got_orchestrator.dag and not any(n.op == GoTOp.AGGREGATE for n in got_orchestrator.dag._nodes.values()):
@@ -1138,6 +1110,7 @@ class OrchestratorEngine:
         retry_events = []
         retries = 0
         max_retries = 2
+        trace.event("first_pass", answer=final_answer)  # what replay.py reproduces (before global retries)
 
         while not is_linear and numeric_score < 7 and retries < max_retries:
             print(f"   [Global Diagnosis] Score {numeric_score}/10 is low. Diagnosing failure...")
@@ -1215,7 +1188,12 @@ class OrchestratorEngine:
                     )
                     print(f"   [Diagnostician] CUGCR context from {len(_ctx_ids)} peer node(s) injected.")
 
-                fix_result, _ = await self._execute_agent(agent, new_q, depth=3)
+                _tok = trace.enter_node(f"retry{retries}", agent=agent, op="retry", task=new_q, parents=[])
+                try:
+                    fix_result, _ = await self._execute_agent(agent, new_q, depth=3)
+                    trace.record_node(output=fix_result)
+                finally:
+                    trace.exit_node(_tok)
 
                 # The question is restated so the rewrite keeps any output format it asks for.
                 synth_prompt = (f"Update the final answer to the user's question with this new information. "
@@ -1228,6 +1206,8 @@ class OrchestratorEngine:
                 match = re.search(r'Score:\s*(\d+)/10', judge_score_raw, re.IGNORECASE)
                 numeric_score = int(match.group(1)) if match else 0
 
+                trace.event("retry", retry_num=retries, failing_agent=agent, score_before=prev_score,
+                            score_after=numeric_score)
                 retry_events.append({
                     "retry_num":      retries,
                     "failing_agent":  agent,
@@ -1372,6 +1352,11 @@ class OrchestratorEngine:
             "llm_usage":             usage_meter.snapshot(),
         }
 
+        trace_path = trace.end_run(final_answer=final_answer, judge_score=numeric_score, judge_raw=judge_score_raw,
+                                   global_retries=retries, latency_seconds=latency,
+                                   llm_usage=run_telemetry["llm_usage"])
+        run_telemetry["trace_file"] = str(trace_path) if trace_path else None
+
         telemetry_file = "experiment_telemetry.json"
         all_data = []
         if os.path.exists(telemetry_file):
@@ -1392,6 +1377,7 @@ class OrchestratorEngine:
             "numeric_score": numeric_score,
             "communication_metrics": comm_data,
             "llm_usage": run_telemetry["llm_usage"],
+            "trace_file": run_telemetry["trace_file"],
         }
 
     async def run(self, user_input: str, ablation_mode: str = "adaptive", start_time: float = None,

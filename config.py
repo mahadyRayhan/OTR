@@ -91,6 +91,15 @@ class Config:
     CONTEXT_ROUTING_MODE = "heavy"
 
     # ---------------------------------------------------------
+    # COMPONENT SWITCHES (for ablations; run_pilot.py --set KEY=VALUE overrides any setting)
+    # ---------------------------------------------------------
+    # Context policy on every DAG edge (orchestrator/context_layer.py): None = from the run's
+    # ablation mode ("cugcr" for "adaptive"), or "none", "raw", "cugcr", or one a branch registers.
+    CONTEXT_POLICY = None
+    # Append the user's request to goals that refer to it ("the provided sequence", "options A-D").
+    ATTACH_REQUEST = True
+
+    # ---------------------------------------------------------
     # ORCHESTRATION MODE
     # ---------------------------------------------------------
     # Controls the execution strategy used by the engine.

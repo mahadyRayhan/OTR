@@ -23,6 +23,7 @@ import re
 import asyncio
 import chromadb
 import gemini_client as genai
+from orchestrator import trace
 from orchestrator.context_format import entities, task_text
 from typing import Optional
 
@@ -64,6 +65,9 @@ def _query_vector_db(query: str, n_results: int = 5) -> str:
         
         if not results['documents'] or not results['documents'][0]:
             return ""
+        trace.record_retrieval("code_index", query, [
+            {"id": i, "title": m.get("source", ""), "distance": round(float(d), 4)}
+            for i, m, d in zip(results["ids"][0], results["metadatas"][0], results.get("distances", [[0] * 99])[0])])
             
         retrieved_text = ""
         for i, doc in enumerate(results['documents'][0]):

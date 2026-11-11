@@ -4,8 +4,9 @@ scoring.py — judge-free scoring for the test sets in journal_fixes/data/testse
   prompt(item)          the question plus a format instruction for its answer type
   score(item, answer)   {"correct": bool | None, "answered": bool, "parts": {...}, "parsed": ...}
                         correct is None when the format needs an external harness (code execution)
-  summarize(rows)       accuracy, precision (correct / answered), coverage (answered / total), and
-                        per-part accuracy for structured items
+  summarize(rows)       accuracy (with a 95% bootstrap interval), precision (correct / answered),
+                        coverage (answered / total), and per-part accuracy for structured items
+  paired_difference(a, b)  system A minus system B on the same items: mean, 95% interval, sign test
 
 Formats
   mcq           choices lettered A..; an "Insufficient information" option is added last (as in
@@ -20,12 +21,19 @@ Formats
                 Full system: DOI, command (executable and, if any, subcommand) and the two cloud parts;
                 the item is correct only if all four are. Every part is reported in summarize().
   code          needs a test harness; scored as None here (BioCoder: biocoder_eval.check).
+  geneturing    GeneTuring/GeneHop (build_geneturing.py): GeneGPT's rules per task; correct = full credit,
+                parts.credit = the partial credit GeneGPT reports (gene lists, alignments)
+  checklist     multi-part questions (build_multipart_pilot.py): gold is a list of checks (cited DOI, term and
+                code-call patterns, the code parses); credit = share passed, correct = all passed, parts = one
+                flag per section (explain / code / cloud) that is set when every check of that section passed.
+                parsed is None: nothing is extracted, so self-consistency voting does not apply
 
 Self-test: python journal_fixes/scripts/scoring.py
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 
@@ -92,6 +100,11 @@ def prompt(item: dict) -> str:
                 '"memory_gb": <number>, "instance": "<EC2 instance type>"}')
     if fmt == "code":
         return f"{q}\n\nGive the complete function, with the imports it needs, in one ```python code block."
+    if fmt == "checklist":
+        return (f"{q}\n\nAnswer every part of the request. Put code in fenced code blocks (```python for Python, "
+                "```snakemake for Snakemake, ```hcl for Terraform). Cite the key papers you rely on, with their DOIs.")
+    if fmt == "geneturing":
+        return f"{q}\n\nEnd your response with a final line of the form 'ANSWER: {GENETURING_FORMAT[item['meta']['task']]}'."
     return q
 
 
@@ -168,6 +181,12 @@ def score(item: dict, answer: str) -> dict:
         within = lambda a, b: f" {a} " in f" {b} "  # whole-word containment, so "9" does not match "19"
         ok = bool(p) and any(s and (within(s, p) or (len(p) >= 3 and within(p, s)) or _token_f1(p, s) >= 0.8) for s in syn)
         return {"correct": ok, "answered": bool(p), "parsed": line, "parts": {}}
+    if fmt == "checklist":
+        return _checklist(gold["checks"], answer or "")
+    if fmt == "geneturing":
+        line = _last_answer_line(answer)
+        credit = _geneturing(item["meta"]["task"], line, gold) if line else 0.0
+        return {"correct": credit == 1.0, "answered": bool(line), "parsed": line, "parts": {"credit": credit}}
     if fmt == "doi":
         line = _last_answer_line(answer) or ""
         found = {_norm_doi(d) for d in DOI_RE.findall(line)}
@@ -188,6 +207,86 @@ def score(item: dict, answer: str) -> dict:
             "note": "needs the official benchmark harness"}
 
 
+CODE_BLOCK = re.compile(r"```[ \t]*([\w+-]*)[^\n]*\n(.*?)```", re.S)
+
+
+def _parses(code: str) -> bool:
+    try:
+        ast.parse(code)
+        return True
+    except SyntaxError:
+        return False
+
+
+def _checklist(checks: list[dict], answer: str) -> dict:
+    blocks = CODE_BLOCK.findall(answer)
+    code = "\n".join(b for _, b in blocks)
+    dois = {_norm_doi(d) for d in DOI_RE.findall(answer)}
+    passed = {}
+    for c in checks:
+        k = c["kind"]
+        if k == "doi":
+            ok = bool(dois & {_norm_doi(d) for d in c["dois"]})
+        elif k == "terms":
+            ok = bool(re.search(c["pattern"], answer, re.I))
+        elif k == "calls":
+            ok = bool(re.search(c["pattern"], code, re.I))
+        elif k == "parses":
+            ok = any(_parses(b) for lang, b in blocks if lang.lower() in ("", "python", "py", "python3"))
+        elif k == "snakemake":
+            ok = len(re.findall(r"^\s*rule\s+\w+\s*:", code, re.M)) >= 3
+        else:
+            raise ValueError(f"unknown check kind {k}")
+        passed[c["id"]] = ok
+    sections = sorted({c["section"] for c in checks})
+    parts = {sec: all(v for cid, v in passed.items() if cid.startswith(sec + ".")) for sec in sections}
+    credit = sum(passed.values()) / len(passed)
+    return {"correct": credit == 1.0, "answered": bool(answer.strip()), "parsed": None, "parts": parts,
+            "credit": round(credit, 3), "checks": passed}
+
+
+# GeneTuring / GeneHop (build_geneturing.py): the answer format asked for, per task, and GeneGPT's
+# evaluate.py rules for comparing it with the gold answer.
+GENETURING_FORMAT = {
+    "Gene alias": "<official gene symbol>",
+    "Gene name conversion": "<official gene symbol>",
+    "Gene SNP association": "<official gene symbol>",
+    "Gene disease association": "<official gene symbols, comma-separated>",
+    "Gene location": "chr<chromosome>, e.g. chr7",
+    "SNP location": "chr<chromosome>, e.g. chr7",
+    "Human genome DNA aligment": "chr<chromosome>:<start>-<end> (GRCh38)",
+    "Multi-species DNA aligment": "<one of: human, mouse, rat, chicken, zebrafish, worm, yeast>",
+    "Protein-coding genes": "yes or no",
+    "Disease gene location": "<chromosome bands, comma-separated, e.g. 17q21.31, 7q34>",
+}
+_SPECIES = {"homo sapiens": "human", "mus musculus": "mouse", "rattus norvegicus": "rat", "gallus gallus": "chicken",
+            "danio rerio": "zebrafish", "caenorhabditis elegans": "worm", "saccharomyces cerevisiae": "yeast"}
+
+
+def _geneturing(task: str, line: str, gold) -> float:
+    """Credit in [0, 1] by GeneGPT's rules; symbols and chromosomes compared case-insensitively."""
+    a = line.strip().strip(".").strip()
+    norm = lambda v: re.sub(r"\s+", "", str(v)).lower()
+    if task in ("Gene location", "SNP location"):
+        a = a.split()[-1] if a else a
+        a = a if a.lower().startswith("chr") else "chr" + a
+        return float(norm(a) == norm(gold))
+    if task == "Protein-coding genes":
+        a = {"yes": "TRUE", "true": "TRUE", "no": "NA", "na": "NA"}.get(a.lower(), a)
+        return float(a == gold)
+    if task == "Multi-species DNA aligment":
+        return float(_SPECIES.get(a.lower(), a.lower()) == gold.lower())
+    if task == "Human genome DNA aligment":
+        if norm(a) == norm(gold):
+            return 1.0
+        return 0.5 if norm(a.split(":")[0]) == norm(gold.split(":")[0]) else 0.0
+    if task in ("Gene disease association", "Disease gene location"):
+        golds = gold if isinstance(gold, list) else gold.split(", ")
+        pred = {norm(x) for x in re.split(r"[,;]", a)}
+        return sum(norm(g) in pred for g in golds) / len(golds)
+    return float(norm(a) == norm(gold))
+
+
 def summarize(rows: list[dict]) -> dict:
     scored = [r for r in rows if r["correct"] is not None]
     n = len(scored)
@@ -196,10 +295,48 @@ def summarize(rows: list[dict]) -> dict:
     out = {"n": n, "accuracy": round(correct / n, 3) if n else None,
            "precision": round(correct / answered, 3) if answered else None,
            "coverage": round(answered / n, 3) if n else None}
+    if n:
+        out["accuracy_ci95"] = bootstrap_ci([bool(r["correct"]) for r in scored])
     keys = sorted({k for r in scored for k in r["parts"]})
     if keys:
         out["parts"] = {k: round(sum(bool(r["parts"].get(k)) for r in scored) / n, 3) for k in keys}
+    if any("credit" in r for r in scored):  # checklist items: mean share of checks passed
+        out["credit"] = round(sum(r.get("credit", 0) for r in scored) / n, 3)
+        out["credit_ci95"] = bootstrap_ci([r.get("credit", 0) for r in scored])
     return out
+
+
+def bootstrap_ci(values: list, n_boot: int = 5000, seed: int = 0) -> list[float]:
+    """95% percentile-bootstrap interval of the mean."""
+    import random
+    rng, k = random.Random(seed), len(values)
+    means = sorted(sum(values[rng.randrange(k)] for _ in range(k)) / k for _ in range(n_boot))
+    return [round(means[int(0.025 * n_boot)], 3), round(means[int(0.975 * n_boot) - 1], 3)]
+
+
+def paired_difference(a: list, b: list, n_boot: int = 5000, seed: int = 0) -> dict:
+    """Mean of a - b over the same items (correct = 1), its 95% bootstrap interval, and an exact
+    two-sided sign test on the items where the systems disagree."""
+    from math import comb
+    d = [int(bool(x)) - int(bool(y)) for x, y in zip(a, b)]
+    wins, losses = d.count(1), d.count(-1)
+    m = wins + losses
+    tail = sum(comb(m, i) for i in range(min(wins, losses) + 1)) / 2 ** m if m else 1.0
+    return {"n": len(d), "diff": round(sum(d) / len(d), 3) if d else None,
+            "ci95": bootstrap_ci(d, n_boot, seed) if d else None, "wins": wins, "losses": losses,
+            "sign_test_p": round(min(1.0, 2 * tail), 4)}
+
+
+def paired_credit(a: list[float], b: list[float], n_boot: int = 5000, seed: int = 0) -> dict:
+    """paired_difference for checklist credit (a share in [0, 1]) instead of correct / wrong."""
+    from math import comb
+    d = [x - y for x, y in zip(a, b)]
+    wins, losses = sum(x > 0 for x in d), sum(x < 0 for x in d)
+    m = wins + losses
+    tail = sum(comb(m, i) for i in range(min(wins, losses) + 1)) / 2 ** m if m else 1.0
+    return {"n": len(d), "diff": round(sum(d) / len(d), 3) if d else None,
+            "ci95": bootstrap_ci(d, n_boot, seed) if d else None, "wins": wins, "losses": losses,
+            "sign_test_p": round(min(1.0, 2 * tail), 4)}
 
 
 # ── self-test ────────────────────────────────────────────────────────────────

@@ -32,7 +32,7 @@ def main(run: Path, domain: str) -> None:
         if r["id"] not in items:  # removed from the set since the run (refine_paper_gold.py)
             dropped.append(r["id"])
             continue
-        for system in ("sciweaver", "gemini"):
+        for system in [k for k in ("sciweaver", "react", "gemini", "strong", "self_consistency") if k in r]:
             x = items[r["id"]]
             s = (check if x["answer_format"] == "code" else score)(x, r[system]["answer"])
             rows[(r["set"], system)].append(s)

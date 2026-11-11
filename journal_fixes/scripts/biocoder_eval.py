@@ -15,7 +15,7 @@ of that test (same context files, placeholders and output comparison), not the a
 The model's code runs only here, for evaluation, inside the container: no network, read-only file
 system except a small /tmp, 1 CPU, 2 GB memory, a time limit per run. SciWeaver itself runs no code.
 
-Setup:     docker build -t sciweaver-biocoder:1 journal_fixes/biocoder_docker
+Setup:     docker build -t sciweaver-sandbox:1 docker/sandbox   (the shared sandbox image)
 Drop items whose prompt names a function the test never calls (8 of 86):
            python journal_fixes/scripts/biocoder_eval.py --drop-misnamed bio
 Self-test: python journal_fixes/scripts/biocoder_eval.py --selftest [--split dev]
@@ -36,7 +36,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 BENCH = Path.home() / "otr_local" / "benchmarks" / "biocoder.json"
-IMAGE = "sciweaver-biocoder:1"
+IMAGE = "sciweaver-sandbox:1"
 TRIALS = 5
 RUN_SECONDS = 30
 SLOT = re.compile(r"^([ \t]*)<<insert solution here>>[ \t]*$", re.M)

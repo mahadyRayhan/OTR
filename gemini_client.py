@@ -49,6 +49,9 @@ def client() -> _genai.Client:
 
 def resolve(model_name: str) -> str:
     name = model_name.replace("models/", "")
+    swap = os.getenv("SCIWEAVER_MODEL")  # e.g. gemini-3.8-flash: replaces every Flash Lite model (all agents and judges)
+    if swap and "flash-lite" in name:
+        return swap
     return _VERTEX_ALIASES.get(name, name) if use_vertex() else name
 
 

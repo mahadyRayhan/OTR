@@ -37,6 +37,7 @@ from typing import Any
 
 import aiohttp
 
+from orchestrator import llm_cache
 from rag_agent.rag_config import settings
 
 logger = logging.getLogger(__name__)
@@ -583,8 +584,12 @@ class KnowledgeBase:
 
         # 1. Parallel fetch from all sources
         chroma_task = asyncio.create_task(self._chroma_papers(query))
-        pubmed_task = asyncio.create_task(self.pubmed.search(query, max_results=settings.rerank_top_k // 2))
-        s2_task = asyncio.create_task(self.s2.search(query, limit=settings.rerank_top_k // 2))
+        # Live searches go through the run cache (when on) so a replayed run sees the same papers.
+        n_live = settings.rerank_top_k // 2
+        pubmed_task = asyncio.create_task(llm_cache.memo_async("pubmed", [query, n_live], self.pubmed.search,
+                                                               query, max_results=n_live))
+        s2_task = asyncio.create_task(llm_cache.memo_async("s2_search", [query, n_live], self.s2.search,
+                                                           query, limit=n_live))
 
         chroma_papers, pubmed_papers, s2_papers = await asyncio.gather(
             chroma_task, pubmed_task, s2_task
